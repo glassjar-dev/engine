@@ -133,7 +133,7 @@ function parseCli(argv: string[]): CliOpts {
 async function ensureEngineLinked() {
   logInfo('installing library...');
   await $`npm link`.cwd(ROOT).quiet();
-  await $`npm link debugger-sh`.cwd(HERE).quiet();
+  await $`npm link glassjar`.cwd(HERE).quiet();
 }
 
 /** Relative path from `tools/dap/tests` using `/` (e.g. `formatting/string`). */
@@ -435,8 +435,8 @@ async function main() {
 
   if (hasEngine) {
     await waitForDevBuild();
-    if (!existsSync(path.join(ROOT, 'dist/debugger-sh.js')))
-      die(`missing dist/debugger-sh.js. Run 'npm run build' first.`);
+    if (!existsSync(path.join(ROOT, 'dist/glassjar.js')))
+      die(`missing dist/glassjar.js. Run 'npm run build' first.`);
     await ensureEngineLinked();
   }
   if (opts.lldb)

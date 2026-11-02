@@ -5,7 +5,7 @@
 // Usage:  npx -y bun compare.ts <program.(cpp|c)>
 // Env:    BENCH_ITERS=5  BENCH_OPT=O0   (engine compiles user code at -O0; match it)
 import { $ } from 'bun';
-import { Engine } from 'debugger-sh';
+import { Engine } from 'glassjar';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 

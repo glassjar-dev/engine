@@ -1,5 +1,5 @@
 {
-  "name": "debugger-sh",
+  "name": "glassjar",
   "version": "0.3.15",
   "description": "A browser-based execution engine and debugger powered by WebAssembly",
   "keywords": [
@@ -12,17 +12,17 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/debugger-sh/engine.git"
+    "url": "git+https://github.com/Yousef02/engine.git"
   },
   "type": "module",
-  "main": "./dist/debugger-sh.umd.cjs",
-  "module": "./dist/debugger-sh.js",
+  "main": "./dist/glassjar.umd.cjs",
+  "module": "./dist/glassjar.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/debugger-sh.js",
-      "require": "./dist/debugger-sh.umd.cjs"
+      "import": "./dist/glassjar.js",
+      "require": "./dist/glassjar.umd.cjs"
     }
   },
   "files": [

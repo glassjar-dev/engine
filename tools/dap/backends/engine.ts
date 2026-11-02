@@ -1,6 +1,6 @@
 import { $ } from 'bun';
 import chalk from 'chalk';
-import type { Artifact } from 'debugger-sh';
+import type { Artifact } from 'glassjar';
 import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -9,7 +9,7 @@ import process from 'node:process';
 import type { Backend, BackendOptions, Json } from '../run';
 
 export async function createEngineBackend(opts: BackendOptions): Promise<Backend> {
-  const { Engine } = await import('debugger-sh');
+  const { Engine } = await import('glassjar');
   const engine = await Engine.create(opts.lang);
   engine.debugger.enabled = true;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

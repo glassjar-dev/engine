@@ -6,7 +6,7 @@
     "test": "npm install --silent && npx -y bun run.ts"
   },
   "dependencies": {
-    "debugger-sh": "file:../..",
+    "glassjar": "file:../..",
     "@types/bun": "^1.3.13",
     "chalk": "^5.6.2",
     "strip-json-comments": "^5.0.3"

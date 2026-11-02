@@ -1,11 +1,11 @@
-# debugger-sh
+# glassjar
 
 A browser-based execution engine powered by WebAssembly. Compile and run C/C++ and Python programs entirely in the browser with a built-in debugger.
 
 ## Installation
 
 ```bash
-npm install debugger-sh
+npm install glassjar
 ```
 
 > **Requires** these response headers (the engine uses `SharedArrayBuffer` for stdin):
@@ -20,7 +20,7 @@ npm install debugger-sh
 ## Quick start
 
 ```ts
-import { Engine } from 'debugger-sh';
+import { Engine } from 'glassjar';
 
 const engine = await Engine.create('c');
 
@@ -108,6 +108,6 @@ To test against the reference IDE, clone [debugger-sh/debugger.sh](https://githu
 ```bash
 npm link                  # in this repo
 cd ../debugger.sh
-npm link debugger-sh
+npm link glassjar
 npm run dev
 ```

@@ -7,13 +7,13 @@ This guide is for teams building an IDE or editor on top of this engine. It cove
 ## Installation
 
 ```sh
-npm install debugger-sh
+npm install glassjar
 ```
 
 The package ships a WebAssembly binary and TypeScript bindings. Initialize it once before use:
 
 ```ts
-import { Engine } from 'debugger-sh';
+import { Engine } from 'glassjar';
 
 const engine = await Engine.create('c'); // or 'python'
 ```

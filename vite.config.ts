@@ -41,7 +41,7 @@ function wasm(): PluginOption {
         }
       }
 
-      const file = path.join(outDir, 'debugger-sh.js');
+      const file = path.join(outDir, `${packageName}.js`);
       if (!fs.existsSync(file)) return; // in worker builds this file doesn't exist yet
       let js = fs.readFileSync(file, { encoding: 'utf-8' });
       js = js.replaceAll(/(["'`])data:application\/wasm[^"'`]*\1/g, '""');
