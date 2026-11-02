@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::util::weak_error;
 use crate::{debug::NamespaceHierarchy, types::CodeOffset};
 
+use super::unit::Language;
 use super::{Dwarf, R, Unit};
 use gimli::Reader;
 
@@ -106,6 +107,24 @@ impl<'a> Die<'a> {
         };
 
         self.ctx.unit.file_at(index)
+    }
+
+    /// Returns whether this entry belongs to the standard library.
+    pub fn is_builtin(&self) -> bool {
+        if self
+            .decl_file()
+            .is_some_and(|path| is_builtin_file(self.ctx.unit.language(), path))
+        {
+            return true;
+        }
+        let Some(spec) = self.die_ref_attr(gimli::DW_AT_specification) else {
+            return false;
+        };
+        let Ok(spec) = spec.deref(self.ctx.dwarf) else {
+            return false;
+        };
+        spec.decl_file()
+            .is_some_and(|path| is_builtin_file(self.ctx.unit.language(), path))
     }
 
     /// Returns the qualified name of this entry which includes
@@ -310,6 +329,17 @@ pub enum Visit {
     SkipChildren,
     /// Stop traversal immediately
     Break,
+}
+
+fn is_builtin_file(language: Language, path: &PathBuf) -> bool {
+    match language {
+        Language::C => path.starts_with("/include/wasm32-wasip1"),
+        Language::Cpp => {
+            path.starts_with("/include/c++/v1") || path.starts_with("/include/wasm32-wasip1")
+        }
+        Language::Rust => path.starts_with("/rustc") || path.starts_with("/lib/rustlib"),
+        Language::Unknown => false,
+    }
 }
 
 fn parse_namespace_component(die: &Die<'_>) -> Option<String> {

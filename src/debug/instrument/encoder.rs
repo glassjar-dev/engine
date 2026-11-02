@@ -77,7 +77,7 @@ fn parse_debug_functions(dwarf: &Dwarf) -> Vec<DebugFunction> {
 
             let mut result = Vec::new();
             root.traverse(|child| {
-                if child.tag() != gimli::DW_TAG_subprogram {
+                if child.tag() != gimli::DW_TAG_subprogram || child.is_builtin() {
                     return Visit::Continue;
                 }
 

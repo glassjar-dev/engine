@@ -1,0 +1,82 @@
+{
+  // Passing `std::string` by value materializes the argument with a standard
+  // library copy constructor before `FriendGraph::add` runs. Step-into must
+  // land in the user function, not in that constructor.
+  "steps": [
+    {
+      "type": "request",
+      "command": "setBreakpoints",
+      "arguments": {
+        "source": { "path": "main.cpp" },
+        "breakpoints": [{ "line": 18 }]
+      }
+    },
+    {
+      "type": "response",
+      "body": {
+        "breakpoints": {
+          "$array.contains": [{ "line": 18, "verified": true }]
+        }
+      }
+    },
+    {
+      "type": "request",
+      "command": "configurationDone",
+      "arguments": {}
+    },
+    {
+      "type": "event",
+      "event": "stopped",
+      "body": { "reason": "breakpoint", "threadId": "${{thread}}" },
+      "$timeout": 15000
+    },
+    {
+      "type": "request",
+      "command": "stackTrace",
+      "arguments": { "threadId": "{{thread}}" }
+    },
+    {
+      "type": "response",
+      "body": {
+        "stackFrames": {
+          "$array.prefix": [{ "name": "addPeople", "line": 18 }]
+        }
+      }
+    },
+    {
+      "type": "request",
+      "command": "stepIn",
+      "arguments": { "threadId": "{{thread}}" }
+    },
+    {
+      "type": "event",
+      "event": "stopped",
+      "body": { "reason": "step", "threadId": "{{thread}}" },
+      "$timeout": 15000
+    },
+    {
+      "type": "request",
+      "command": "stackTrace",
+      "arguments": { "threadId": "{{thread}}" }
+    },
+    {
+      "type": "response",
+      "body": {
+        "stackFrames": {
+          "$array.prefix": [
+            {
+              "name": "FriendGraph::add",
+              "line": 13,
+              "source": { "path": "/main.cpp" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "request",
+      "command": "continue",
+      "arguments": { "threadId": "{{thread}}" }
+    }
+  ]
+}

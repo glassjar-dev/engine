@@ -18,6 +18,37 @@ pub struct UnitProperties {
     pub file_offset: usize,
 }
 
+/// Source language of a compilation unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    Rust,
+    C,
+    Cpp,
+    Unknown,
+}
+
+impl Language {
+    fn from_dwarf(lang: gimli::DwLang) -> Self {
+        match lang {
+            gimli::DW_LANG_Rust => Self::Rust,
+            gimli::DW_LANG_C89
+            | gimli::DW_LANG_C
+            | gimli::DW_LANG_C99
+            | gimli::DW_LANG_C11
+            | gimli::DW_LANG_C17 => Self::C,
+            gimli::DW_LANG_C_plus_plus
+            | gimli::DW_LANG_C_plus_plus_03
+            | gimli::DW_LANG_C_plus_plus_11
+            | gimli::DW_LANG_C_plus_plus_14
+            | gimli::DW_LANG_C_plus_plus_17
+            | gimli::DW_LANG_C_plus_plus_20 => Self::Cpp,
+            other if other.0 == 0x003e => Self::C,   // C23
+            other if other.0 == 0x003a => Self::Cpp, // C++23
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Unit {
     /// Provides direct access to `gimli`
@@ -84,6 +115,24 @@ impl Unit {
 
     pub fn index(&self) -> usize {
         self.properties.index
+    }
+
+    /// Returns the source language of this compilation unit.
+    pub fn language(&self) -> Language {
+        let mut entries = self.unit.entries();
+        let Some(true) = weak_error!(entries.next_entry()) else {
+            return Language::Unknown;
+        };
+        let Some(die) = entries.current() else {
+            return Language::Unknown;
+        };
+        let Some(attr) = die.attr(gimli::DW_AT_language) else {
+            return Language::Unknown;
+        };
+        let gimli::AttributeValue::Language(lang) = attr.value() else {
+            return Language::Unknown;
+        };
+        Language::from_dwarf(lang)
     }
 
     pub fn locations(&self) -> impl Iterator<Item = Location> {
