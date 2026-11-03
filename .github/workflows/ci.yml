@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,7 +47,7 @@ jobs:
         run: node --experimental-strip-types --test tools/runtime-cache/*.test.*
 
       - name: TU cache identity and guard tests
-        run: cargo test -p engine-cpp-cache-tests
+        run: cargo test -p engine-cpp-cache-tests -p engine-cpp-stock-policy-tests
 
       - name: Lint
         run: npx eslint src/

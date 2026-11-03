@@ -24,3 +24,10 @@ pub fn prefetch_urls(lang: &str) -> Vec<String> {
         _ => Vec::new(),
     }
 }
+
+/// Identity of the embedded runtime, verified by the parent against its build manifest.
+#[wasm_bindgen]
+pub fn cpp_exception_hash() -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(include_bytes!("../assets/cpp-exceptions/runtime.tar.gz")))
+}

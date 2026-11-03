@@ -10,12 +10,17 @@ use crate::types::{CppArtifacts, CppCacheBypass, CppCacheEntry, CppCacheRequest,
 
 mod debuggee;
 mod cpp_cache;
+mod cpp_cache_inputs;
+mod cpp_stock_policy;
+mod cpp_stock_trace;
+mod cpp_stock_trace_host;
+mod cpp_stock_job;
 pub(crate) mod execution;
 pub(crate) mod host_device;
 mod io;
 mod runtime;
 
-use execution::{Execution, extract_tar_gz, fetch_bytes};
+use execution::{Execution, extract_tar_gz};
 use host_device::{HOST_DEVICE_PATH, HostDeviceFile};
 
 // ╭──────────────────────────────────────────────────────────────────────────╮
@@ -180,6 +185,21 @@ pub(crate) fn stop(exit_code: i32, build_start: Instant, run_start: Option<Insta
 }
 
 async fn start(msg: WorkerStart) {
+    crate::types::set_operation_identity(msg.scope_epoch, msg.operation_id, msg.cache_epoch);
+    if msg.prepare_compiler {
+        let started = Instant::now();
+        if msg.lang != Lang::C { return WorkerOut::Error { message: "Compiler preparation requires C/C++".into() }.send(); }
+        if let Err(error) = execution::prepare_compiler().await {
+            return WorkerOut::Error { message: format!("Compiler preparation failed: {error:?}") }.send();
+        }
+        cpp_phase("toolchain_ready", 0, 0);
+        if !msg.validate_cache_inputs { return stop(0, started, None).send(); }
+        if !execution::compiler_toolchain().is_some_and(|t| t.stock_profile) {
+            WorkerOut::CppCacheEligibility { eligible: false, certificate_sha256: None, snapshot: None, reason: Some("stock-profile-required".into()) }.send();
+            return stop(0, started, None).send();
+        }
+        return start_native(msg).await;
+    }
     if msg.build_only && msg.lang != Lang::C {
         return WorkerOut::Error { message: "Compile-only preparation requires C/C++".into() }.send();
     }
@@ -208,15 +228,16 @@ async fn start_native(msg: WorkerStart) {
             return WorkerOut::Error { message: "C++ sources must select existing source files".into() }.send();
         }
         sources = selected;
-    }
+    } else { sources.sort(); }
     for path in artifacts.archives.iter().flatten().chain(artifacts.precompiled_header.iter()) {
         if !msg.binary_files.contains_key(path) {
             return WorkerOut::Error { message: format!("Missing binary build input: {path}") }.send();
         }
     }
-    sources.sort();
     let hash_start = Instant::now();
-    let cache_inputs = msg.cpp_cache.as_ref().map(|_| cpp_cache_inputs(&msg.fs, &msg.binary_files, &sources));
+    let stock_profile = execution::compiler_toolchain().is_some_and(|toolchain| toolchain.stock_profile);
+    let cache_inputs = msg.cpp_cache.as_ref().filter(|_| !stock_profile).map(|_| legacy_user_inputs(&msg.fs, &msg.binary_files, &sources));
+    let stock_inputs = (stock_profile && (msg.cpp_cache.is_some() || msg.validate_cache_inputs)).then(|| stock_user_inputs(&msg.fs, &msg.binary_files));
     let input_hash_ms = hash_start.elapsed().as_secs_f64() * 1000.0;
 
     let lang_name = match msg.lang {
@@ -261,15 +282,15 @@ async fn start_native(msg: WorkerStart) {
                     .send();
                 }
             };
-            let llvm = fetch_bytes(CPP_WASM_URL).await.expect("toolchain");
-            start_cpp(is_debug, msg.build_only, build_start, sources, exec, fs, host_device, artifacts, msg.cpp_cache, cache_inputs, &llvm, input_hash_ms).await;
+            let toolchain = execution::compiler_toolchain().expect("verified toolchain");
+            start_cpp(is_debug, msg.build_only, msg.prepare_compiler, build_start, sources, exec, fs, host_device, artifacts, msg.cpp_cache, cache_inputs, stock_inputs, toolchain, input_hash_ms).await;
         }
         Lang::Rust => start_rust(is_debug, build_start, sources, exec, fs).await,
         Lang::Python => unreachable!(),
     }
 }
 
-fn cpp_cache_inputs(
+fn legacy_user_inputs(
     fs: &std::collections::HashMap<String, FsNode>,
     binaries: &std::collections::HashMap<String, serde_bytes::ByteBuf>,
     sources: &[String],
@@ -292,11 +313,50 @@ fn cpp_cache_inputs(
     cpp_cache::Inputs::new(files, paths, sources)
 }
 
+fn stock_user_inputs(
+    fs: &std::collections::HashMap<String, FsNode>,
+    binaries: &std::collections::HashMap<String, serde_bytes::ByteBuf>,
+) -> Result<cpp_cache_inputs::UserInputs, cpp_cache_inputs::Bypass> {
+    fn walk<'a>(node: &'a FsNode, path: String, files: &mut Vec<(String, &'a [u8])>) {
+        match node {
+            FsNode::File(text) => files.push((path, text.as_bytes())),
+            FsNode::Dir(children) => for (name, child) in children { walk(child, format!("{path}/{name}"), files); },
+        }
+    }
+    let mut files = Vec::new();
+    for (name, node) in fs { walk(node, format!("/{name}"), &mut files); }
+    for (path, bytes) in binaries { files.push((path.clone(), bytes.as_ref())); }
+    cpp_cache_inputs::UserInputs::new(files)
+}
+
+/// Enumerate the exact mounted namespace before generating any output. Every
+/// toolchain member is bound by the verified archives; user overlays have their
+/// own precomputed byte digests. Unknown filesystem kinds make caching optional.
+fn stock_namespace(fs: &mem_fs::FileSystem) -> Result<(Vec<String>, Vec<String>), cpp_cache_inputs::Bypass> {
+    let mut directories = vec!["/".to_string()];
+    let mut files = Vec::new();
+    let mut pending = vec!["/".to_string()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs.read_dir(Path::new(&directory)).map_err(|_| cpp_cache_inputs::Bypass::DependencyClosure)? {
+            let entry = entry.map_err(|_| cpp_cache_inputs::Bypass::DependencyClosure)?;
+            let path = entry.path().to_string_lossy().into_owned();
+            if path.len() > cpp_cache::MAX_SOURCE_PATH { return Err(cpp_cache_inputs::Bypass::UnsupportedPath); }
+            let kind = entry.file_type().map_err(|_| cpp_cache_inputs::Bypass::DependencyClosure)?;
+            if kind.is_dir() { directories.push(path.clone()); pending.push(path); }
+            else if kind.is_file() { files.push(path); }
+            else { return Err(cpp_cache_inputs::Bypass::UnsupportedPath); }
+        }
+    }
+    files.sort(); files.dedup(); directories.sort(); directories.dedup();
+    Ok((files, directories))
+}
+
 struct CppCacheJob {
     generation: u32,
     entries: std::collections::HashMap<String, CppCacheEntry>,
-    pending: Vec<CppCacheEntry>,
+    pending_count: usize,
     pending_bytes: usize,
+    metadata_limit: usize,
     stats: CppCacheStats,
 }
 
@@ -307,20 +367,10 @@ impl CppCacheJob {
         }
     }
 
-    fn send(self, publish: bool) {
-        if publish {
-            for entry in self.pending {
-                WorkerOut::CppCacheObject {
-                    generation: self.generation,
-                    source: entry.source,
-                    key: entry.key,
-                    object_hash: entry.object_hash,
-                    object: &entry.object,
-                }.send();
-            }
-        }
+    fn send(self) {
         WorkerOut::CppCacheStats { generation: self.generation, stats: self.stats }.send();
     }
+
 }
 
 fn cpp_clang_args(source: &str, is_debug: bool, artifacts: &CppArtifacts, depfile: bool) -> Vec<String> {
@@ -349,9 +399,93 @@ fn cpp_link_args(sources: &[String], artifacts: &CppArtifacts) -> Vec<String> {
     args
 }
 
+async fn compile_stock_source(
+    exec: &Execution, cache: &mut Option<CppCacheJob>, mut job: Option<&mut Result<cpp_stock_job::StockJob, String>>,
+    source: &str, source_index: usize, source_count: usize, is_debug: bool, artifacts: &CppArtifacts,
+) -> Option<i32> {
+    let started = Instant::now();
+    let arguments = cpp_clang_args(source, is_debug, artifacts, false);
+    let metadata_limit = cache.as_ref().map_or(0, |c| c.metadata_limit);
+    let eligibility = if is_debug { Err("debug-profile".to_string()) }
+        else if metadata_limit == 0 { Err("stock-metadata-budget".to_string()) }
+        else { match job.as_deref_mut() {
+            Some(Ok(job)) => job.preflight_source(exec, source).await,
+            Some(Err(reason)) => Err(reason.clone()),
+            None => Err("stock-cache-disabled".into()),
+        }};
+    if let Some(cache) = cache { cache.stats.hash_ms += started.elapsed().as_secs_f64() * 1000.0; }
+    let object_path = format!("{source}.o");
+    let lookup_started = Instant::now();
+    let mut hit = false;
+    if let Some(cache) = cache {
+        match &eligibility {
+            Err(reason) => cache.bypass(source, reason),
+            Ok(()) => {
+                if let Some(entry) = cache.entries.remove(source) {
+                    let key = entry.receipt.as_ref().ok_or("stock-metadata-missing".to_string()).and_then(|record| {
+                        job.as_deref().and_then(|j| j.as_ref().ok()).ok_or("stock-cache-disabled".to_string())?
+                            .lookup_key(record, source, &arguments, metadata_limit)
+                    });
+                    if key.as_ref().is_ok_and(|key| *key == entry.key) {
+                        if entry.object.len() <= 128 * 1024 * 1024 && cpp_cache::valid_object(&entry.object, &entry.object_hash) {
+                            hit = exec.write_bytes(&object_path, &entry.object).await.is_ok();
+                        }
+                        if !hit && cache.stats.invalid_sources.len() < cpp_cache::MAX_REPORTED_SOURCES { cache.stats.invalid_sources.push(source.into()); }
+                    } else if key.is_err() && cache.stats.invalid_sources.len() < cpp_cache::MAX_REPORTED_SOURCES { cache.stats.invalid_sources.push(source.into()); }
+                }
+                if hit { cache.stats.hits += 1; if cache.stats.hit_sources.len() < cpp_cache::MAX_REPORTED_SOURCES { cache.stats.hit_sources.push(source.into()); } }
+                else { cache.stats.misses += 1; }
+            }
+        }
+        cache.stats.lookup_ms += lookup_started.elapsed().as_secs_f64() * 1000.0;
+    }
+    if hit { cpp_phase("cache_hit", source_index, source_count); return None; }
+    // Observe even a lexically ineligible miss when the registered job exists:
+    // an unexpected mutating syscall must disable later lookups in this build.
+    let trace = if is_debug { None } else { job.as_deref().and_then(|j| j.as_ref().ok()).filter(|j| j.active().is_ok()).map(|j| j.trace(source)) };
+    cpp_phase("translation_unit_start", source_index, source_count);
+    let output_before = exec.output_bytes();
+    let compile_started = Instant::now();
+    if let Some(cache) = cache { cache.stats.clang_invocations += 1; }
+    let exit = exec.step("clang").binary("/llvm.core.wasm").compiler_stock(trace.clone()).args(&arguments).run().await.expect("Compilation succeeded");
+    cpp_phase("translation_unit_complete", source_index, source_count);
+    if let Some(cache) = cache { cache.stats.compile_ms += compile_started.elapsed().as_secs_f64() * 1000.0; }
+    if !exit.is_success() { return Some(exit.raw()); }
+    let expected_capture = trace.is_some();
+    let observation = trace.and_then(|t| t.lock().ok().map(|t| t.finish()));
+    let capture_bypass = observation.as_ref().and_then(|o| o.bypass)
+        .or_else(|| (expected_capture && observation.is_none()).then_some("stock-capture-unavailable"));
+    if let Some(reason) = capture_bypass {
+        if let Some(Ok(job)) = job.as_deref_mut() { job.poison(reason); }
+        WorkerOut::CppCacheAbandon.send();
+        if let Some(cache) = cache { cache.bypass(source, reason); }
+        return None;
+    }
+    if eligibility.is_err() { return None; }
+    let (Some(cache), Some(Ok(job)), Some(observation)) = (cache, job, observation) else { return None; };
+    if exec.output_bytes() != output_before { cache.bypass(source, "compiler-diagnostics"); return None; }
+    let Ok(object) = exec.read_cache_bytes(&object_path, (128 * 1024 * 1024usize).saturating_sub(cache.pending_bytes)).await else {
+        WorkerOut::CppCacheAbandon.send(); cache.bypass(source, "object-capture-budget-or-missing"); return None;
+    };
+    let admitted = Instant::now();
+    let (key, record) = match job.admit(exec, source, &arguments, observation, metadata_limit).await {
+        Ok(value) => value, Err(reason) => { cache.bypass(source, &reason); return None; },
+    };
+    cache.stats.hash_ms += admitted.elapsed().as_secs_f64() * 1000.0;
+    let object_hash = cpp_cache::hash(&object);
+    if !cpp_cache::valid_object(&object, &object_hash) { cache.bypass(source, "invalid-object"); return None; }
+    if cache.pending_count >= 256 || object.len() > 128 * 1024 * 1024 - cache.pending_bytes {
+        WorkerOut::CppCacheAbandon.send(); cache.bypass(source, "staging-budget"); return None;
+    }
+    cache.pending_bytes += object.len(); cache.pending_count += 1;
+    WorkerOut::CppCacheObject { generation: cache.generation, source: source.into(), key, object_hash, receipt: Some(record), object: &object }.send();
+    None
+}
+
 async fn start_cpp(
     is_debug: bool,
     build_only: bool,
+    prepare_only: bool,
     build_start: Instant,
     sources: Vec<String>,
     exec: Execution,
@@ -360,26 +494,21 @@ async fn start_cpp(
     artifacts: CppArtifacts,
     request: Option<CppCacheRequest>,
     inputs: Option<cpp_cache::Inputs>,
-    compiler_bytes: &[u8],
+    stock_inputs: Option<Result<cpp_cache_inputs::UserInputs, cpp_cache_inputs::Bypass>>,
+    toolchain: std::rc::Rc<execution::CompilerToolchain>,
     input_hash_ms: f64,
 ) {
-    // The identities below come from the exact bytes mounted for this job, never
-    // from a caller-supplied version, URL, length or timestamp.
-    let sysroot_bytes = fetch_bytes(CPP_STDLIB_URL).await.expect("C++ sysroot");
     let hash_start = Instant::now();
-    let identities = request.as_ref().map(|_| (
-        cpp_cache::hash(compiler_bytes),
-        cpp_cache::hash(&sysroot_bytes),
-        cpp_cache::hash(include_bytes!("../../assets/cpp-exceptions/runtime.tar.gz")),
-    ));
+    let identities = request.as_ref().map(|_| &toolchain.identities);
     let mut cache = request.map(|request| CppCacheJob {
         generation: request.generation,
         entries: request.entries.into_iter().take(cpp_cache::MAX_REPORTED_SOURCES).map(|entry| (entry.source.clone(), entry)).collect(),
-        pending: Vec::new(),
+        pending_count: 0,
         pending_bytes: 0,
+        metadata_limit: request.max_entry_metadata_bytes.unwrap_or(0).min(cpp_cache_inputs::MAX_METADATA_BYTES),
         stats: CppCacheStats { hash_ms: input_hash_ms + hash_start.elapsed().as_secs_f64() * 1000.0, ..Default::default() },
     });
-    let sysroot: Arc<dyn FileSystem + Send + Sync> = Arc::new(extract_tar_gz(sysroot_bytes).await.expect("C++ sysroot filesystem"));
+    let sysroot: Arc<dyn FileSystem + Send + Sync> = Arc::new(extract_tar_gz(toolchain.sysroot.clone()).await.expect("C++ sysroot filesystem"));
     exec.fs.union(&sysroot);
     // These files add exception support without replacing the fetched sysroot.
     let exceptions: Arc<dyn FileSystem + Send + Sync> = Arc::new(
@@ -388,12 +517,36 @@ async fn start_cpp(
     exec.fs.union(&exceptions);
     let user_fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(fs);
     exec.fs.union(&user_fs);
-    // User resources cannot shadow the exact trusted compiler bytes identified
-    // above or enter the immutable compiler-module cache under its marker.
-    exec.write_bytes("/llvm.core.wasm", compiler_bytes).await.expect("toolchain");
+    // Compiler code is an internal verified handle, never a mutable guest file.
     let link_args = cpp_link_args(&sources, &artifacts);
+    let stock_started = Instant::now();
+    let mut stock_job = if let Some(inputs) = stock_inputs {
+        Some(cpp_stock_job::StockJob::new(&exec, &artifacts, &sources, inputs, &toolchain).await)
+    } else { None };
+    if prepare_only {
+        let result = match stock_job.as_mut() {
+            Some(Ok(job)) => job.preflight(&exec).await.and_then(|_| job.snapshot().map(|snapshot| (job.certificate().to_string(), snapshot))),
+            Some(Err(reason)) => Err(reason.clone()),
+            None => Err("stock-cache-disabled".into()),
+        };
+        match result {
+            Ok((certificate, snapshot)) => WorkerOut::CppCacheEligibility { eligible: true, certificate_sha256: Some(certificate), snapshot: Some(snapshot), reason: None }.send(),
+            Err(reason) => WorkerOut::CppCacheEligibility { eligible: false, certificate_sha256: stock_job.as_ref().and_then(|j| j.as_ref().ok()).map(|j| j.certificate().into()), snapshot: None, reason: Some(reason) }.send(),
+        }
+        return stop(0, build_start, None).send();
+    }
+    if let Some(cache) = &mut cache { cache.stats.hash_ms += stock_started.elapsed().as_secs_f64() * 1000.0; }
 
-    for source in &sources {
+    cpp_phase("object_build_start", 0, sources.len());
+    for (source_index, source) in sources.iter().enumerate() {
+        yield_to_messages().await;
+        if toolchain.stock_profile {
+            if let Some(exit) = compile_stock_source(&exec, &mut cache, stock_job.as_mut(), source, source_index, sources.len(), is_debug, &artifacts).await {
+                if let Some(cache) = cache { cache.send(); }
+                return stop(exit, build_start, None).send();
+            }
+            continue;
+        }
         let obj_path = format!("{source}.o");
         let hash_start = Instant::now();
         let bypass = if is_debug { Some("debug-profile") }
@@ -427,10 +580,13 @@ async fn start_cpp(
             cache.stats.lookup_ms += lookup_start.elapsed().as_secs_f64() * 1000.0;
         }
         // A hit is counted only here, when the clang step is actually omitted.
-        if cached { continue; }
+        if cached { cpp_phase("cache_hit", source_index, sources.len()); continue; }
+        cpp_phase("translation_unit_start", source_index, sources.len());
         let output_before = exec.output_bytes();
         let compile_start = Instant::now();
+        if let Some(cache) = &mut cache { cache.stats.clang_invocations += 1; }
         let exit = exec.step("clang").binary("/llvm.core.wasm").compiler().args(&clang_args).run().await.expect("Compilation succeeded");
+        cpp_phase("translation_unit_complete", source_index, sources.len());
         if let Some(cache) = &mut cache { cache.stats.compile_ms += compile_start.elapsed().as_secs_f64() * 1000.0; }
         // Dependency receipts are compiler-private. They must never appear in
         // the student filesystem or differ between cache misses and hits.
@@ -439,13 +595,13 @@ async fn start_cpp(
             let bytes = exec.read_bytes(&dep_path).await;
             let _ = exec.fs.remove_file(Path::new(&dep_path));
             if exec.fs.metadata(Path::new(&dep_path)).is_ok() {
-                if let Some(cache) = cache { cache.send(false); }
+                if let Some(cache) = cache { cache.send(); }
                 return WorkerOut::Error { message: "Cannot remove compiler dependency receipt".into() }.send();
             }
             Some(bytes)
         } else { None };
         if !exit.is_success() {
-            if let Some(cache) = cache { cache.send(false); }
+            if let Some(cache) = cache { cache.send(); }
             return stop(exit.raw(), build_start, None).send();
         }
         if let Some(cache) = &mut cache {
@@ -480,36 +636,71 @@ async fn start_cpp(
                 if user_headers.iter().any(|bytes| cpp_cache::references_tainted_macro(bytes, &tainted)) {
                     cache.bypass(source, "dynamic-system-macro"); continue;
                 }
-                let Ok(object) = exec.read_bytes(&obj_path).await else { cache.bypass(source, "missing-object"); continue; };
+                let Ok(object) = exec.read_cache_bytes(&obj_path, (128 * 1024 * 1024usize).saturating_sub(cache.pending_bytes)).await else {
+                    WorkerOut::CppCacheAbandon.send(); cache.bypass(source, "object-capture-budget-or-missing"); continue;
+                };
                 let object_hash = cpp_cache::hash(&object);
                 if !cpp_cache::valid_object(&object, &object_hash) { cache.bypass(source, "invalid-object"); continue; }
-                if cache.pending.len() >= 256 || object.len() > 128 * 1024 * 1024 - cache.pending_bytes {
+                if cache.pending_count >= 256 || object.len() > 128 * 1024 * 1024 - cache.pending_bytes {
+                    WorkerOut::CppCacheAbandon.send();
                     cache.bypass(source, "staging-budget"); continue;
                 }
                 cache.pending_bytes += object.len();
-                cache.pending.push(CppCacheEntry { source: source.clone(), key, object_hash, object: object.into() });
+                cache.pending_count += 1;
+                WorkerOut::CppCacheObject { generation: cache.generation, source: source.clone(), key, object_hash, receipt: None, object: &object }.send();
             }
         }
     }
 
+    if toolchain.stock_profile {
+        let verified = stock_job.as_ref().and_then(|j| j.as_ref().ok());
+        let eligible = verified.is_some_and(|job| job.active().is_ok()) && cache.as_ref().is_some_and(|c|
+            c.stats.bypasses.is_empty() && c.stats.hits as usize + c.pending_count == sources.len());
+        let reason = if eligible { None } else {
+            cache.as_ref().and_then(|c| c.stats.bypasses.first()).map(|b| b.reason.clone())
+                .or_else(|| stock_job.as_ref().and_then(|j| j.as_ref().err()).cloned())
+                .or_else(|| Some("stock-incomplete-admission".into()))
+        };
+        WorkerOut::CppCacheEligibility { eligible, certificate_sha256: verified.map(|j| j.certificate().into()),
+            snapshot: if eligible { verified.and_then(|j| j.snapshot().ok()) } else { None }, reason }.send();
+    }
+    if let Some(cache) = &mut cache { cache.entries.clear(); }
+    if let Some(cache) = &cache { WorkerOut::CppCacheStats { generation: cache.generation, stats: cache.stats.clone() }.send(); }
+    cpp_phase("object_build_complete", sources.len(), sources.len());
+    // A real macrotask boundary makes queued cancellation observable before commit.
+    yield_to_messages().await;
+    if execution::object_build_complete().await.is_err() {
+        return WorkerOut::Error { message: "Object publication acknowledgement failed".into() }.send();
+    }
     // Preparation stops before linking, student instantiation or host devices.
     if build_only {
-        if let Some(cache) = cache { cache.send(true); }
+        if let Some(cache) = cache { cache.send(); }
         return stop(0, build_start, None).send();
     }
+    cpp_phase("link_start", sources.len(), sources.len());
     let link_start = Instant::now();
-    let exit = exec.step("wasm-ld").binary("/llvm.core.wasm").compiler().args(&link_args).run().await.expect("Linking succeeded");
-    if let Some(cache) = &mut cache { cache.stats.link_ms = link_start.elapsed().as_secs_f64() * 1000.0; }
+    if let Some(cache) = &mut cache { cache.stats.link_invocations += 1; }
+    let mut linker = exec.step("wasm-ld").binary("/llvm.core.wasm").compiler().args(&link_args);
+    if toolchain.stock_profile { linker = linker.compiler_stock(None); }
+    let exit = linker.run().await.expect("Linking succeeded");
+    if let Some(cache) = &mut cache {
+        cache.stats.link_ms = link_start.elapsed().as_secs_f64() * 1000.0;
+        // A noncooperative/GUI guest may never return, and Stop can terminate
+        // this worker. Publish completed compiler counters before guest entry.
+        WorkerOut::CppCacheStats { generation: cache.generation, stats: cache.stats.clone() }.send();
+    }
+    cpp_phase("link_complete", sources.len(), sources.len());
     if !exit.is_success() {
-        if let Some(cache) = cache { cache.send(false); }
+        if let Some(cache) = cache { cache.send(); }
         return stop(exit.raw(), build_start, None).send();
     }
 
     let run_start = Instant::now();
+    cpp_phase("guest_start", sources.len(), sources.len());
     let mut run = exec.step("main").binary("/main.wasm").debug(is_debug);
     if let Some(device) = host_device { run = run.device_file(HOST_DEVICE_PATH, Box::new(device)); }
     let exit = run.run().await.expect("Running succeeded");
-    if let Some(cache) = cache { cache.send(exit.is_success()); }
+    if let Some(cache) = cache { cache.send(); }
     stop(exit.raw(), build_start, Some(run_start)).send();
 }
 
@@ -601,6 +792,18 @@ async fn start_rust(
         .expect("Running succeeded");
 
     stop(exit.raw(), build_start, Some(run_start)).send();
+}
+
+fn cpp_phase(phase: &str, source_index: usize, source_count: usize) {
+    WorkerOut::CppPhase { phase: phase.into(), source_index, source_count }.send();
+}
+
+async fn yield_to_messages() {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let scope = DedicatedWorkerGlobalScope::from(JsValue::from(js_sys::global()));
+        let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0);
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 #[wasm_bindgen]

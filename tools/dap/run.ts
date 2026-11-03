@@ -60,6 +60,10 @@ const ROOT = path.resolve(HERE, '../..');
 const TESTS_DIR = path.join(ROOT, 'tools/dap/tests');
 const OUTPUT_DIR = path.join(ROOT, 'tools/dap/output');
 const DAP_TIMEOUT_MS = 1000;
+// Cold compiler download/JIT and C++ header compilation are part of debugger
+// initialization. Both the original and current bundles can exceed 30 seconds
+// in a full-suite process; keep protocol-response deadlines separate.
+const INITIALIZATION_TIMEOUT_MS = 90000;
 const DEV_BUILD_MARKER = path.join(ROOT, 'node_modules/build.lock');
 const COMMON_INIT_STEPS: Step[] = [
   {
@@ -86,7 +90,7 @@ const COMMON_INIT_STEPS: Step[] = [
       stopOnEntry: false
     }
   },
-  { type: 'event', event: 'initialized', $timeout: 30000 }
+  { type: 'event', event: 'initialized', $timeout: INITIALIZATION_TIMEOUT_MS }
 ];
 
 type CliOpts = {
@@ -271,6 +275,16 @@ async function waitForEvent(
   while (Date.now() < endAt) {
     for (let i = 0; i < queue.length; i++) {
       const event = queue[i];
+      if (
+        eventName === 'initialized' &&
+        event &&
+        typeof event === 'object' &&
+        !Array.isArray(event) &&
+        event.type === 'event' &&
+        event.event === 'runResult'
+      ) {
+        throw new Error(`engine finished before debugger initialization: ${fmtJson(event.body)}`);
+      }
       if (
         event &&
         typeof event === 'object' &&

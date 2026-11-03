@@ -1,3 +1,5 @@
+import type { ToolchainSeed } from './verified-toolchain.js';
+
 /** Internal, engine-scoped immutable code. Never store an Instance or Store here. */
 export interface RetainedCompilerModule {
   readonly module: WebAssembly.Module;
@@ -31,6 +33,8 @@ export interface ConfigureCompilerModule {
 /** One immutable compiler Module; called only by explicitly marked compiler steps. */
 export class CompilerModuleCache {
   private enabled = false;
+  private verified?: ToolchainSeed;
+  private verifiedBytes = 0;
   private generation = 0;
   private retained?: RetainedCompilerModule;
   private stats = this.emptyStats();
@@ -52,8 +56,36 @@ export class CompilerModuleCache {
       /^[a-f0-9]{64}$/.test(compilerModule.sha256)
     ) {
       // Also own direct callers' input; structured cloning alone is not this contract.
-      this.retained = { ...compilerModule, bytes: compilerModule.bytes.slice() };
+      this.retained = { ...compilerModule, bytes: new Uint8Array(compilerModule.bytes) };
     }
+  }
+
+  /** Private worker seed received only from the engine's verified owner. */
+  configureVerified(seed: ToolchainSeed, enabled: boolean): void {
+    this.enabled = enabled;
+    this.verifiedBytes = seed.compiler.byteLength;
+    this.verified = { ...seed, compiler: new Uint8Array(), sysroot: new Uint8Array() };
+    this.retained = undefined;
+    this.stats = this.emptyStats();
+  }
+
+  beginOperation(): void {
+    this.stats = this.emptyStats();
+  }
+
+  constructVerified(bytes: Uint8Array): WebAssembly.Module {
+    const seed = this.verified;
+    if (!seed) throw new Error('Compiler toolchain is not configured');
+    if (seed.module && this.enabled) {
+      this.stats.hits++;
+      this.publishStats();
+      return seed.module;
+    }
+    this.stats.misses++;
+    const module = this.compile(bytes);
+    if (this.enabled) seed.module = module;
+    this.publishStats();
+    return module;
   }
 
   async construct(bytes: Uint8Array): Promise<WebAssembly.Module> {
@@ -62,7 +94,7 @@ export class CompilerModuleCache {
     const stats = this.stats;
 
     // wasm-bindgen may supply a view into growable engine memory. Own it before await.
-    const owned = bytes.slice();
+    const owned = new Uint8Array(bytes);
     let sha256: string;
     const hashStart = performance.now();
     try {
@@ -124,8 +156,8 @@ export class CompilerModuleCache {
     this.send({
       type: 'compiler_module_stats',
       ...this.stats,
-      identityBytes: this.retained?.bytes.byteLength ?? 0,
-      sha256: this.retained?.sha256
+      identityBytes: this.verified ? this.verifiedBytes : (this.retained?.bytes.byteLength ?? 0),
+      sha256: this.verified?.compilerHash ?? this.retained?.sha256
     });
   }
 
