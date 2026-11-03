@@ -159,8 +159,10 @@ fn find_rust_rlibs(fs: &mem_fs::FileSystem) -> Vec<String> {
 // ╰──────────────────────────────────────────────────────────────────────────╯
 
 // Single source of truth for these is `prefetch_urls` in lib.rs (warmed by the host).
-pub(crate) const CPP_WASM_URL: &str = "https://fabioibanez.github.io/website/llvm.core.wasm";
-pub(crate) const CPP_STDLIB_URL: &str = "https://fabioibanez.github.io/website/llvm-resources.tar.gz";
+pub(crate) const CPP_WASM_URL: &str = "https://cdn.yousefabuhashem.com/clang/2026-05-22/llvm.core.wasm";
+pub(crate) const CPP_STDLIB_URL: &str = "https://cdn.yousefabuhashem.com/clang/2026-05-22/llvm-resources.tar.gz";
+pub(crate) const RUST_WASM_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-05-31/rustc.wasm";
+pub(crate) const RUST_SYSROOT_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-05-31/rust-sysroot.tar.gz";
 
 /// Builds a `Stop` with build/run timing. `run_start` is `None` when execution never
 /// began (e.g. a compile error), in which case the elapsed time is all build.
@@ -351,11 +353,11 @@ async fn start_rust(
 
         let mut step = exec
             .step("rustc")
-            .binary("https://debugger-sh.github.io/engine/rustc.wasm")
+            .binary(RUST_WASM_URL)
             .args(&rustc_args);
         if let Some(fs) = union_fs.take() {
             step = step
-                .sysroot("https://debugger-sh.github.io/engine/rust-sysroot.tar.gz")
+                .sysroot(RUST_SYSROOT_URL)
                 .fs(fs);
         }
         let exit = step.run().await.expect("Compilation succeeded");
@@ -388,7 +390,7 @@ async fn start_rust(
 
     let exit = exec
         .step("wasm-ld")
-        .binary("https://fabioibanez.github.io/website/llvm.core.wasm")
+        .binary(CPP_WASM_URL)
         .args(link_args.iter().map(String::as_str))
         .run()
         .await
