@@ -111,6 +111,7 @@ pub struct Instrumenter {
     pub bkpt_fn_index: u32,
     pub stack_mem_index: u32,
     pub sp_gl_index: u32,
+    pub unwind_blocks: HashMap<u32, wasm_encoder::BlockType>,
 
     num_imported_functions: u32,
     num_imported_globals: u32,
@@ -135,11 +136,14 @@ impl Instrumenter {
             functions: parse_debug_functions(&info.dwarf),
             locations: Vec::new(),
             info,
-            validator: wasmparser::Validator::new(),
+            validator: wasmparser::Validator::new_with_features(
+                wasmparser::WasmFeatures::default() | wasmparser::WasmFeatures::LEGACY_EXCEPTIONS,
+            ),
             bkpt_type_index: 0,
             bkpt_fn_index: 0,
             stack_mem_index,
             sp_gl_index: 0,
+            unwind_blocks: HashMap::new(),
             num_imported_functions: 0,
             num_imported_globals: 0,
             code_section_start: 0,
@@ -260,6 +264,17 @@ impl reencode::Reencode for Instrumenter {
         Ok(())
     }
 
+    fn parse_tag_section(
+        &mut self,
+        tags: &mut wasm_encoder::TagSection,
+        section: wasmparser::TagSectionReader<'_>,
+    ) -> InstrResult {
+        self.validator
+            .tag_section(&section)
+            .map_err(reencode::Error::from)?;
+        reencode::utils::parse_tag_section(self, tags, section)
+    }
+
     fn parse_function_section(
         &mut self,
         functions: &mut wasm_encoder::FunctionSection,
@@ -294,9 +309,36 @@ impl reencode::Reencode for Instrumenter {
         self.validator
             .type_section(&section)
             .map_err(reencode::Error::from)?;
+        let mut result_types = Vec::new();
+        let mut type_index = 0;
+        for group in section.clone() {
+            for ty in group?.into_types() {
+                if let wasmparser::CompositeInnerType::Func(function) = ty.composite_type.inner {
+                    result_types.push((type_index, function.results().to_vec()));
+                }
+                type_index += 1;
+            }
+        }
         reencode::utils::parse_type_section(self, types, section)?;
         types.ty().function([wasm_encoder::ValType::I32], []);
         self.bkpt_type_index = types.len() - 1;
+        // The cleanup try consumes no parameters, but must preserve every return value.
+        for (index, results) in result_types {
+            let block = match results.as_slice() {
+                [] => wasm_encoder::BlockType::Empty,
+                [ty] => wasm_encoder::BlockType::Result(self.val_type(*ty)?),
+                _ => {
+                    let results = results
+                        .into_iter()
+                        .map(|ty| self.val_type(ty))
+                        .collect::<InstrResult<Vec<_>>>()?;
+                    let index = types.len();
+                    types.ty().function([], results);
+                    wasm_encoder::BlockType::FunctionType(index)
+                }
+            };
+            self.unwind_blocks.insert(index, block);
+        }
         Ok(())
     }
 

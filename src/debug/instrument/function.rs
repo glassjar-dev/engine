@@ -63,6 +63,8 @@ pub struct FnInstrumenter<'a, 'b> {
     /// (parameters + additional locals), then each of these will have local
     /// indices `N, N+1, ...`.
     scratch_locals: Vec<wasmparser::ValType>,
+    // When present, scratch local 0 retains the caller's debug-stack pointer.
+    unwind_block: Option<wasm_encoder::BlockType>,
 }
 
 impl<'a, 'b> FnInstrumenter<'a, 'b> {
@@ -79,6 +81,25 @@ impl<'a, 'b> FnInstrumenter<'a, 'b> {
 
         validator.read_locals(&mut func_body.get_binary_reader())?;
 
+        let has_tags = instr
+            .validator
+            .types(0)
+            .is_some_and(|types| types.tag_count() != 0);
+        let unwind_block = if has_tags {
+            let Some(wasmparser::Frame {
+                block_type: wasmparser::BlockType::FuncType(index),
+                ..
+            }) = validator.get_control_frame(0)
+            else {
+                return error!("Missing function type for exception cleanup");
+            };
+            Some(*instr.unwind_blocks.get(index).ok_or_else(|| {
+                InstrError::UserError(anyhow::anyhow!("Missing exception cleanup block type"))
+            })?)
+        } else {
+            None
+        };
+
         Ok(Self {
             instr,
             func_idx,
@@ -87,7 +108,12 @@ impl<'a, 'b> FnInstrumenter<'a, 'b> {
 
             instructions: Vec::default(),
             stack_intructions: Vec::default(),
-            scratch_locals: Vec::default(),
+            scratch_locals: if unwind_block.is_some() {
+                vec![ValType::I32]
+            } else {
+                Vec::new()
+            },
+            unwind_block,
         })
     }
 
@@ -105,18 +131,32 @@ impl<'a, 'b> FnInstrumenter<'a, 'b> {
     }
 
     fn emit_header(&mut self) {
-        let instr_count = self.instructions.len();
         let frame_size = self.func_mut().size;
+        self.instructions
+            .push(Instruction::GlobalGet(self.instr.sp_gl_index));
+        if self.unwind_block.is_some() {
+            self.instructions
+                .push(Instruction::LocalTee(self.validator.len_locals()));
+        }
+        self.stack_intructions.push(self.instructions.len());
         self.instructions.extend([
-            Instruction::GlobalGet(self.instr.sp_gl_index),
             Instruction::I32Const(frame_size as i32),
             Instruction::I32Sub,
             Instruction::GlobalSet(self.instr.sp_gl_index),
         ]);
-        self.stack_intructions.push(instr_count + 1);
+        if let Some(block) = self.unwind_block {
+            self.instructions.push(Instruction::Try(block));
+        }
     }
 
     fn emit_footer(&mut self) {
+        if self.unwind_block.is_some() {
+            self.instructions.extend([
+                Instruction::LocalGet(self.validator.len_locals()),
+                Instruction::GlobalSet(self.instr.sp_gl_index),
+            ]);
+            return;
+        }
         let instr_count = self.instructions.len();
         let frame_size = self.func_mut().size;
         self.instructions.extend([
@@ -258,7 +298,9 @@ impl<'a, 'b> FnInstrumenter<'a, 'b> {
                 .iter()
                 .enumerate()
                 .position(|(scratch_idx, &scratch_ty)| {
-                    !scratch_indices.contains(&scratch_idx) && scratch_ty == ty
+                    !(self.unwind_block.is_some() && scratch_idx == 0)
+                        && !scratch_indices.contains(&scratch_idx)
+                        && scratch_ty == ty
                 })
                 .unwrap_or_else(|| {
                     let scratch_idx = self.scratch_locals.len();
@@ -424,6 +466,13 @@ impl<'a, 'b> FnInstrumenter<'a, 'b> {
                 }
                 wasmparser::Operator::End => {
                     if reader.eof() {
+                        if self.unwind_block.is_some() {
+                            // Unwinding skips ordinary returns; discard this debug frame too.
+                            self.instructions.push(Instruction::CatchAll);
+                            self.emit_footer();
+                            self.instructions.push(Instruction::Rethrow(0));
+                            self.instructions.push(Instruction::End);
+                        }
                         self.emit_footer();
                     }
                     self.emit_op(op)?;

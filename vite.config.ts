@@ -6,7 +6,16 @@ import dts from 'vite-plugin-dts';
 const outDir = 'dist';
 
 export default defineConfig({
-  plugins: [wasm(), dts()],
+  plugins: [
+    wasm(),
+    dts({
+      beforeWriteFile(filePath, content) {
+        // Public EventEmitter types also work when consumers exclude ambient types.
+        if (/from ['"]events['"]/.test(content))
+          return { filePath, content: `/// <reference types="node" />\n${content}` };
+      }
+    })
+  ],
   worker: {
     format: 'es',
     plugins: () => [wasm()]
@@ -61,7 +70,16 @@ function wasm(): PluginOption {
       // In dev mode, we serve compiled Rust .wasm files from a local dev server
       if (devPort) return `export default new URL("http://localhost:${devPort}/${wasmFile}");`;
 
-      // In release mode, we serve .wasm files from the npm registry via CDN
+      // Same-origin asset path for Cloudflare static deploys. Use a plain
+      // string (not `new URL(..., import.meta.url)`) so Next/webpack does not
+      // try to resolve `/engine_bg.wasm` at build time. Requires a real
+      // http(s) worker script — not `?worker&inline` data: URLs.
+      const sameOriginWasm = process.env.WASM_ASSET_PATH;
+      if (isRelease && sameOriginWasm) {
+        return `export default ${JSON.stringify(sameOriginWasm)};`;
+      }
+
+      // Otherwise serve .wasm files from the npm registry via CDN
       if (isRelease)
         return `export default new URL(${JSON.stringify(`${npmDistUrl}/${wasmFile}`)});`;
 

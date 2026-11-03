@@ -26,7 +26,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "assets/cpp-exceptions/runtime.tar.gz"
   ],
   "scripts": {
     "build:rs": "wasm-pack build --target web",
@@ -47,9 +48,11 @@
       "prettier --write"
     ]
   },
+  "dependencies": {
+    "@types/node": "22.13.1"
+  },
   "devDependencies": {
     "@trivago/prettier-plugin-sort-imports": "^6.0.2",
-    "@types/node": "^22.13.1",
     "eslint": "^9.39.2",
     "events": "^3.3.0",
     "husky": "^9.1.7",

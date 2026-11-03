@@ -1,0 +1,45 @@
+{
+  "steps": [
+    {
+      "type": "request",
+      "command": "setBreakpoints",
+      "arguments": { "source": { "path": "/main.cpp" }, "breakpoints": [{ "line": 22 }] }
+    },
+    { "type": "response", "body": { "breakpoints": [{ "verified": true }] } },
+    { "type": "request", "command": "configurationDone" },
+    { "type": "event", "event": "stopped", "body": { "reason": "breakpoint" } },
+    { "type": "request", "command": "stackTrace", "arguments": { "threadId": 1 } },
+    { "type": "response", "body": { "stackFrames": "${{frames}}" } },
+    {
+      "type": "expect",
+      "run": "return frames[0].name === 'main' && frames.filter(f => f.name === 'main').length === 1 && frames.every(f => !['leaf', 'middle', '__cxa_throw', 'ordinary'].includes(f.name));",
+      "expect": true
+    },
+    { "type": "request", "command": "scopes", "arguments": { "frameId": "{{frames[0].id}}" } },
+    {
+      "type": "response",
+      "body": {
+        "scopes": { "$array.contains": [{ "name": "Locals", "variablesReference": "${{locals}}" }] }
+      }
+    },
+    {
+      "type": "request",
+      "command": "variables",
+      "arguments": { "variablesReference": "{{locals}}" }
+    },
+    {
+      "type": "response",
+      "body": {
+        "variables": {
+          "$array.contains": [
+            { "name": "sentinel", "value": "37" },
+            { "name": "observed", "value": "9" },
+            { "name": "continued", "value": "42" }
+          ]
+        }
+      }
+    },
+    { "type": "request", "command": "continue", "arguments": { "threadId": 1 } },
+    { "type": "event", "event": "runResult", "body": { "type": "completed", "exitCode": 0 } }
+  ]
+}

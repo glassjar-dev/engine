@@ -37,6 +37,10 @@ export async function createEngineBackend(opts: BackendOptions): Promise<Backend
   });
 
   const runPromise = engine.run();
+  // Test-only completion signal; production DAP does not carry the run result.
+  void runPromise.then((result) => {
+    for (const cb of eventCbs) cb({ type: 'event', event: 'runResult', body: result });
+  });
 
   return {
     async send(req) {
@@ -67,6 +71,8 @@ export async function createEngineBackend(opts: BackendOptions): Promise<Backend
           /* swallow; reported as test failure if needed */
         }
       );
+      // Some scenarios intentionally finish while the guest is still paused.
+      await engine.dispose();
       await Promise.all(artifactTasks);
     }
   };

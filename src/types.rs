@@ -110,10 +110,78 @@ pub enum Lang {
 pub struct WorkerStart {
     pub fs: HashMap<String, FsNode>,
 
+    #[serde(default)]
+    #[tsify(type = "Record<string, Uint8Array>")]
+    pub binary_files: HashMap<String, serde_bytes::ByteBuf>,
+    #[serde(default)]
+    pub cpp_artifacts: Option<CppArtifacts>,
+    #[serde(default)]
+    pub cpp_cache: Option<CppCacheRequest>,
+    #[serde(default)]
+    pub build_only: bool,
+
+    #[serde(default)]
+    pub host_device: Option<HostDeviceStart>,
+
     #[serde(with = "serde_wasm_bindgen::preserve")]
     pub stdin_buffer: js_sys::SharedArrayBuffer,
     pub is_debug: bool,
     pub lang: Lang,
+}
+
+/// Optional inputs produced by the same C++ toolchain as this engine.
+#[derive(Default, Debug, Tsify, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CppArtifacts {
+    #[serde(default)]
+    pub sources: Option<Vec<String>>,
+    #[serde(default)]
+    pub archives: Option<Vec<String>>,
+    #[serde(default)]
+    pub precompiled_header: Option<String>,
+}
+
+/// Internal, owned snapshots of this engine's memory-only translation-unit cache.
+#[derive(Debug, Tsify, Deserialize)]
+pub struct CppCacheRequest {
+    pub generation: u32,
+    pub entries: Vec<CppCacheEntry>,
+}
+
+#[derive(Debug, Tsify, Deserialize)]
+pub struct CppCacheEntry {
+    pub source: String,
+    pub key: String,
+    pub object_hash: String,
+    #[tsify(type = "Uint8Array")]
+    pub object: serde_bytes::ByteBuf,
+}
+
+#[derive(Default, Debug, Tsify, Serialize)]
+pub struct CppCacheStats {
+    pub hits: u32,
+    pub misses: u32,
+    pub bypasses: Vec<CppCacheBypass>,
+    pub hit_sources: Vec<String>,
+    pub invalid_sources: Vec<String>,
+    pub hash_ms: f64,
+    pub lookup_ms: f64,
+    pub compile_ms: f64,
+    pub link_ms: f64,
+}
+
+#[derive(Debug, Tsify, Serialize)]
+pub struct CppCacheBypass {
+    pub source: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Tsify, Deserialize)]
+pub struct HostDeviceStart {
+    #[serde(with = "serde_wasm_bindgen::preserve")]
+    pub guest_to_host: js_sys::SharedArrayBuffer,
+    #[serde(with = "serde_wasm_bindgen::preserve")]
+    pub host_to_guest: js_sys::SharedArrayBuffer,
 }
 
 #[derive(Clone, Copy, Debug, Tsify, Serialize_repr)]
@@ -154,6 +222,22 @@ pub enum WorkerOut<'a> {
         name: String,
     },
 
+    #[serde(rename = "cpp_cache_object")]
+    CppCacheObject {
+        generation: u32,
+        source: String,
+        key: String,
+        object_hash: String,
+        #[tsify(type = "Uint8Array")]
+        #[serde(with = "serde_bytes")]
+        object: &'a [u8],
+    },
+    #[serde(rename = "cpp_cache_stats")]
+    CppCacheStats {
+        generation: u32,
+        stats: CppCacheStats,
+    },
+
     /// Indicate that execution has paused.
     ///
     /// DWARF backends send `reason`; Python sends a `frame` snapshot it derives the
@@ -178,6 +262,8 @@ pub enum WorkerOut<'a> {
     /// failed to load) — distinct from the user's program exiting non-zero.
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "host_wake")]
+    HostWake,
 }
 
 impl<'a> WorkerOut<'a> {
