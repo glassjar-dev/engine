@@ -15,6 +15,22 @@ npm install glassjar
 > Cross-Origin-Opener-Policy: same-origin
 > ```
 
+### Hosting the engine Wasm
+
+By default the engine loads its own `engine_bg.wasm` (about 9 MB) from jsDelivr, at
+the exact version you installed, and its worker script from `dist/assets/` next to the
+package, which bundlers pick up automatically. To serve the Wasm from your own site
+instead, copy `node_modules/glassjar/dist/engine_bg.wasm` into your static files and
+pass its URL:
+
+```ts
+const engine = await Engine.create('c', { wasmUrl: '/engine_bg.wasm' });
+```
+
+Relative URLs resolve against the page, and only `http:`/`https:` are accepted. The
+file must come from the same package version. A page loads the engine Wasm once, so
+every `Engine.create` on a page must pass the same `wasmUrl`.
+
 ---
 
 ## Quick start

@@ -6,6 +6,9 @@ import dts from 'vite-plugin-dts';
 const outDir = 'dist';
 
 export default defineConfig({
+  // Emit the worker as `new URL('./assets/…', import.meta.url)` instead of a root path,
+  // so it resolves next to the package wherever a host serves or bundles it.
+  base: './',
   plugins: [
     wasm(),
     dts({

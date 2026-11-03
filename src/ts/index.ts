@@ -11,8 +11,11 @@ import { HostDeviceOpener, HostDeviceSession } from './host-device.js';
 import { requireToolchainManifest } from './toolchain-manifest.js';
 import { errorResult, Internals } from './util.js';
 import { VerifiedToolchain } from './verified-toolchain.js';
+import { resolveWasmUrl } from './wasm-source.js';
 
 let initialization: ReturnType<typeof init> | undefined;
+/** The `wasmUrl` the page's Wasm was loaded from; `null` is the build-time default. */
+let initializedFrom: string | null | undefined;
 export type Lang = 'c' | 'python' | 'rust';
 type StdoutMode = 1 | 2;
 
@@ -48,6 +51,13 @@ export interface CppPerformanceOptions {
 }
 export interface EngineOptions {
   cpp?: CppPerformanceOptions;
+  /**
+   * Where to load this package's `dist/engine_bg.wasm` from, for hosts that serve it
+   * themselves. Relative URLs resolve against the page. It must be the file from this
+   * exact package version. Defaults to the URL built into the package (jsDelivr for npm
+   * releases). A page loads the engine Wasm once, so every `create` must agree.
+   */
+  wasmUrl?: string | URL;
 }
 export interface CompilerPreparationOptions {
   /** Inspect an owned candidate snapshot for known cache exclusions, without Clang. */
@@ -159,6 +169,8 @@ export class Engine {
   public hostDevice?: HostDeviceOpener;
 
   private readonly options?: Readonly<CppPerformanceOptions>;
+  /** Absolute `EngineOptions.wasmUrl`, handed to each worker; unset uses the default. */
+  private wasmUrl?: string;
   private readonly objects: CppObjectCache;
   private generation = 0;
   private scopeEpoch = 0;
@@ -196,13 +208,24 @@ export class Engine {
   };
 
   static async create(lang: Lang, options: EngineOptions = {}): Promise<Engine> {
-    const capturedOptions = structuredClone(options);
-    initialization ??= init({ module_or_path: wasmBinary }).catch((error: unknown) => {
+    const { wasmUrl: requestedWasm, ...rest } = options;
+    const wasmUrl =
+      requestedWasm === undefined
+        ? undefined
+        : resolveWasmUrl(requestedWasm, globalThis.location?.href);
+    const capturedOptions = structuredClone(rest);
+    const source = wasmUrl ?? null;
+    if (initializedFrom !== undefined && initializedFrom !== source)
+      throw new Error('The engine Wasm is already loaded from a different wasmUrl');
+    initializedFrom = source;
+    initialization ??= init({ module_or_path: wasmUrl ?? wasmBinary }).catch((error: unknown) => {
       initialization = undefined;
+      initializedFrom = undefined;
       throw error;
     });
     await initialization;
     const engine = new Engine(lang, capturedOptions);
+    engine.wasmUrl = wasmUrl;
     if (lang !== 'c' && typeof window !== 'undefined' && typeof fetch !== 'undefined')
       for (const url of prefetch_urls(lang))
         void fetch(url, { cache: 'force-cache' })
@@ -514,7 +537,7 @@ export class Engine {
   }
 
   private makeWorker(): void {
-    const worker = createEngineWorker();
+    const worker = createEngineWorker(this.wasmUrl);
     const slot: WorkerSlot = { worker, ready: false, remove: () => {} };
     this.slot = slot;
     const onMessage = (event: MessageEvent<InternalMessage>) => {

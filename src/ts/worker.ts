@@ -2,6 +2,7 @@ import init, * as wasm from '../../pkg/engine.js';
 import wasmBinary from '../../pkg/engine_bg.wasm';
 import { CompilerModuleCache, ConfigureCompilerModule } from './compiler-module-cache';
 import type { ToolchainSeed } from './verified-toolchain';
+import { resolveWasmUrl, WASM_WORKER_NAME_PREFIX } from './wasm-source';
 
 let identity = { scopeEpoch: 0, operationId: 0, cacheEpoch: 0 };
 let acknowledge: (() => void) | undefined;
@@ -59,7 +60,10 @@ addEventListener(
 );
 
 try {
-  await init({ module_or_path: wasmBinary });
+  const hostWasm = self.name.startsWith(WASM_WORKER_NAME_PREFIX)
+    ? resolveWasmUrl(self.name.slice(WASM_WORKER_NAME_PREFIX.length))
+    : undefined;
+  await init({ module_or_path: hostWasm ?? wasmBinary });
   wasm.set_compiler_module_constructor((bytes: Uint8Array) =>
     compilerModules.constructVerified(bytes)
   );
