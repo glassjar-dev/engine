@@ -446,13 +446,44 @@ impl<'a> Step<'a> {
     }
 }
 
+/// Waits before each retry of a failed download.
+const FETCH_RETRY_DELAYS_MS: [i32; 2] = [250, 1000];
+
+/// Download `url`, retrying network failures. Chrome can fail a worker's fetch outright
+/// when the page is prefetching the same large file at the same moment.
 pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>, JsValue> {
+    let mut delays = FETCH_RETRY_DELAYS_MS.iter();
+    loop {
+        match fetch_bytes_once(url).await {
+            Ok(Some(bytes)) => return Ok(bytes),
+            // An HTTP error status is an answer, not a network failure: don't retry it.
+            Ok(None) => return Err(JsValue::from_str(&format!("{url} returned an HTTP error"))),
+            Err(err) => match delays.next() {
+                Some(&ms) => sleep_ms(ms).await,
+                None => return Err(err),
+            },
+        }
+    }
+}
+
+async fn fetch_bytes_once(url: &str) -> Result<Option<Vec<u8>>, JsValue> {
     let scope = DedicatedWorkerGlobalScope::from(JsValue::from(js_sys::global()));
     let response: web_sys::Response = JsFuture::from(scope.fetch_with_str(url))
         .await?
         .dyn_into()?;
+    if !response.ok() {
+        return Ok(None);
+    }
     let buffer = JsFuture::from(response.array_buffer()?).await?;
-    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+    Ok(Some(js_sys::Uint8Array::new(&buffer).to_vec()))
+}
+
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let scope = DedicatedWorkerGlobalScope::from(JsValue::from(js_sys::global()));
+        let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 pub async fn extract_tar_gz(data: Vec<u8>) -> Result<mem_fs::FileSystem, std::io::Error> {
