@@ -32,12 +32,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '23.x'
+          node-version: '24.x'
           cache: npm
           registry-url: 'https://registry.npmjs.org'
 
-      # Ensure npm 11.5.1 or later for trusted publishing
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm 11.5.1+; pin the major so a new npm major can't break releases
+      - run: npm install -g npm@11
       - run: npm ci
       - run: echo "cur_version=$(jq -r .version package.json)" >> $GITHUB_ENV
       - run: echo "prev_version=$(npm view . version 2>/dev/null || echo '0.0.0')" >> $GITHUB_ENV
