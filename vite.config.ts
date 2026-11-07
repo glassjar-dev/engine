@@ -53,11 +53,21 @@ function wasm(): PluginOption {
         }
       }
 
-      const file = path.join(outDir, `${packageName}.js`);
-      if (!fs.existsSync(file)) return; // in worker builds this file doesn't exist yet
-      let js = fs.readFileSync(file, { encoding: 'utf-8' });
-      js = js.replaceAll(/(["'`])data:application\/wasm[^"'`]*\1/g, '""');
-      fs.writeFileSync(file, js, { encoding: 'utf-8' });
+      // in worker builds the main bundle doesn't exist yet; the main build cleans up after it
+      if (!fs.existsSync(path.join(outDir, `${packageName}.js`))) return;
+      // The wasm-bindgen glue falls back to `new URL('engine_bg.wasm', import.meta.url)`,
+      // which library mode inlines as a ~12 MB data: URL. The engine always passes its own
+      // module_or_path, so strip it from every bundle: ESM, UMD and the worker.
+      const bundles = fs
+        .readdirSync(outDir, { recursive: true })
+        .map(String)
+        .filter((file) => /\.c?js$/.test(file));
+      for (const bundle of bundles) {
+        const file = path.join(outDir, bundle);
+        const js = fs.readFileSync(file, { encoding: 'utf-8' });
+        const stripped = js.replaceAll(/(["'`])data:application\/wasm[^"'`]*\1/g, '""');
+        if (stripped !== js) fs.writeFileSync(file, stripped, { encoding: 'utf-8' });
+      }
     },
 
     /**
