@@ -1,6 +1,7 @@
 use flate2::read::GzDecoder;
 use js_sys::SharedArrayBuffer;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
@@ -35,6 +36,11 @@ thread_local! {
     static TOOLCHAIN: RefCell<Option<Rc<CompilerToolchain>>> = const { RefCell::new(None) };
     static OBJECT_BUILD_OBSERVER: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
     static COMPILER_INSTANCE_OBSERVER: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
+    // A retained worker compiles each network binary (rustc, the linker, Python) and downloads
+    // each sysroot once. Keyed by the engine's fixed URLs; every run still gets a fresh Store,
+    // filesystem and Instance, so no guest state carries over.
+    static NETWORK_MODULES: RefCell<HashMap<String, Module>> = RefCell::new(HashMap::new());
+    static SYSROOTS: RefCell<HashMap<String, Rc<Vec<u8>>>> = RefCell::new(HashMap::new());
 }
 
 pub struct CompilerToolchain {
@@ -263,73 +269,90 @@ impl<'a> Step<'a> {
         /* In debug mode, we need to instrument the binary */
         let mut debugger = None;
 
-        let binary_bytes = if self.compiler {
-            compiler_toolchain().ok_or_else(|| RuntimeError::new("Missing verified compiler toolchain"))?.compiler.clone()
-        } else if binary_loc.starts_with("/") {
-            let mut wasm = self
-                .exec
-                .read_bytes(binary_loc)
-                .await
-                .ensure("Read binary from filesystem")?;
-
-            if self.debug {
-                WorkerOut::Artifact {
-                    data: &wasm,
-                    name: "pre.wasm".into(),
-                }
-                .send();
-
-                let InstrumenterResult {
-                    info,
-                    wasm: instrumented_wasm,
-                } = instrument_wasm(&wasm).ensure("Instrumented WASM")?;
-                debugger = Some(Debuggee::new(info));
-                wasm = instrumented_wasm;
-
-                WorkerOut::Artifact {
-                    data: &wasm,
-                    name: "post.wasm".into(),
-                }
-                .send();
-            }
-
-            wasm
-        } else {
-            fetch_bytes(binary_loc)
-                .await
-                .ensure("Fetch binary from network")?
-        };
-
         let mut store = Store::default();
-        let constructor = if self.compiler {
-            COMPILER_MODULE_CONSTRUCTOR.with(|slot| slot.borrow().clone())
+        let network = !self.compiler && !binary_loc.starts_with("/");
+        let cached = network.then(|| NETWORK_MODULES.with(|m| m.borrow().get(binary_loc).cloned())).flatten();
+        let module = if let Some(module) = cached {
+            module
         } else {
-            None
-        };
-        let module = if let Some(constructor) = constructor {
-            // The JS constructor synchronously takes its own snapshot before its first await.
-            let bytes = unsafe { js_sys::Uint8Array::view(&binary_bytes) };
-            let promise = constructor
-                .call1(&JsValue::UNDEFINED, bytes.as_ref())
-                .ensure("Constructed compiler Module")?;
-            let module: js_sys::WebAssembly::Module =
-                JsFuture::from(js_sys::Promise::resolve(&promise))
+            let binary_bytes = if self.compiler {
+                compiler_toolchain().ok_or_else(|| RuntimeError::new("Missing verified compiler toolchain"))?.compiler.clone()
+            } else if binary_loc.starts_with("/") {
+                let mut wasm = self
+                    .exec
+                    .read_bytes(binary_loc)
                     .await
-                    .ensure("Compiled compiler Module")?
-                    .dyn_into()
-                    .ensure("Received compiler Module")?;
-            // Wasmer's supported JS conversion reparses type hints from these verified bytes.
-            Module::from((module, binary_bytes))
-        } else {
-            Module::from_binary(&store, &binary_bytes).ensure("Created WASM module")?
+                    .ensure("Read binary from filesystem")?;
+
+                if self.debug {
+                    WorkerOut::Artifact {
+                        data: &wasm,
+                        name: "pre.wasm".into(),
+                    }
+                    .send();
+
+                    let InstrumenterResult {
+                        info,
+                        wasm: instrumented_wasm,
+                    } = instrument_wasm(&wasm).ensure("Instrumented WASM")?;
+                    debugger = Some(Debuggee::new(info));
+                    wasm = instrumented_wasm;
+
+                    WorkerOut::Artifact {
+                        data: &wasm,
+                        name: "post.wasm".into(),
+                    }
+                    .send();
+                }
+
+                wasm
+            } else {
+                fetch_bytes(binary_loc)
+                    .await
+                    .ensure("Fetch binary from network")?
+            };
+
+            let constructor = if self.compiler {
+                COMPILER_MODULE_CONSTRUCTOR.with(|slot| slot.borrow().clone())
+            } else {
+                None
+            };
+            let module = if let Some(constructor) = constructor {
+                // The JS constructor synchronously takes its own snapshot before its first await.
+                let bytes = unsafe { js_sys::Uint8Array::view(&binary_bytes) };
+                let promise = constructor
+                    .call1(&JsValue::UNDEFINED, bytes.as_ref())
+                    .ensure("Constructed compiler Module")?;
+                let module: js_sys::WebAssembly::Module =
+                    JsFuture::from(js_sys::Promise::resolve(&promise))
+                        .await
+                        .ensure("Compiled compiler Module")?
+                        .dyn_into()
+                        .ensure("Received compiler Module")?;
+                // Wasmer's supported JS conversion reparses type hints from these verified bytes.
+                Module::from((module, binary_bytes))
+            } else {
+                Module::from_binary(&store, &binary_bytes).ensure("Created WASM module")?
+            };
+            if network {
+                NETWORK_MODULES.with(|m| m.borrow_mut().insert(binary_loc.clone(), module.clone()));
+            }
+            module
         };
 
         /* Fetch the sysroot and union into the vfs if needed */
         if let Some(sysroot_loc) = &self.sysroot {
-            let sysroot_bytes = fetch_bytes(sysroot_loc)
-                .await
-                .ensure("Fetched sysroot from network")?;
-            let sysroot_fs = extract_tar_gz(sysroot_bytes)
+            let cached = SYSROOTS.with(|s| s.borrow().get(sysroot_loc).cloned());
+            let sysroot_bytes = match cached {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = Rc::new(fetch_bytes(sysroot_loc).await.ensure("Fetched sysroot from network")?);
+                    SYSROOTS.with(|s| s.borrow_mut().insert(sysroot_loc.clone(), bytes.clone()));
+                    bytes
+                }
+            };
+            // Extracted per run into a fresh filesystem, so guest writes never reach the cache.
+            let sysroot_fs = extract_tar_gz(sysroot_bytes.as_ref().clone())
                 .await
                 .ensure("Created sysroot fs from tarball")?;
             let sysroot_fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(sysroot_fs);

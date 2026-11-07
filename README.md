@@ -73,7 +73,11 @@ notices and payload provenance are in `share/licenses/cpp-exceptions/` inside
 ## Full API
 
 ```ts
-const engine = await Engine.create('c'); // 'c' | 'python'
+const engine = await Engine.create('c'); // 'c' | 'python' | 'rust'
+// The worker and its compiled compilers stay alive between runs (each run still gets a
+// fresh instance, memory and filesystem) until idle for idleTimeoutMs (default 30 s).
+// Errors, Debug runs and stop() replace it. Opt out with { retainWorker: false }.
+await Engine.create('python', { retainWorker: true, idleTimeoutMs: 30_000 });
 
 engine.fs; // DirNode  — virtual filesystem, set before run()
 engine.binaryFiles; // Record<string, Uint8Array> — optional C/C++ binary files

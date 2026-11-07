@@ -58,6 +58,14 @@ export interface EngineOptions {
    * releases). A page loads the engine Wasm once, so every `create` must agree.
    */
   wasmUrl?: string | URL;
+  /**
+   * Keep the worker and its compiled compilers between runs, so later runs skip worker
+   * startup and compiler setup. Every run still gets a fresh instance, memory and
+   * filesystem. Defaults to true; errors, Debug runs and `stop()` still replace the worker.
+   */
+  retainWorker?: boolean;
+  /** How long a retained worker may sit idle; defaults to 30 seconds, at most five minutes. */
+  idleTimeoutMs?: number;
 }
 export interface CompilerPreparationOptions {
   /** Inspect an owned candidate snapshot for known cache exclusions, without Clang. */
@@ -169,6 +177,8 @@ export class Engine {
   public hostDevice?: HostDeviceOpener;
 
   private readonly options?: Readonly<CppPerformanceOptions>;
+  private readonly retain: boolean;
+  private readonly idleTimeoutMs: number;
   /** Absolute `EngineOptions.wasmUrl`, handed to each worker; unset uses the default. */
   private wasmUrl?: string;
   private readonly objects: CppObjectCache;
@@ -236,13 +246,15 @@ export class Engine {
 
   private constructor(lang: Lang, options: EngineOptions) {
     const cpp = options.cpp;
+    this.retain = options.retainWorker ?? cpp?.retainWorker ?? true;
+    const idleTimeoutMs = options.idleTimeoutMs ?? cpp?.idleTimeoutMs ?? 30_000;
+    if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 1 || idleTimeoutMs > 300_000)
+      throw new RangeError('Worker idle timeout must be between 1 and 300000 milliseconds');
+    this.idleTimeoutMs = idleTimeoutMs;
     if (cpp) {
       if (lang !== 'c') throw new TypeError('C++ performance options require C/C++');
       if (!cpp.scope?.projectId || !cpp.scope.accountId)
         throw new TypeError('C++ performance options require project and account identity');
-      const idleTimeoutMs = cpp.idleTimeoutMs ?? 30_000;
-      if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 1 || idleTimeoutMs > 300_000)
-        throw new RangeError('Compiler idle timeout must be between 1 and 300000 milliseconds');
       if (cpp.compilerLifetime !== undefined && !['idle', 'project'].includes(cpp.compilerLifetime))
         throw new TypeError('Invalid compiler lifetime');
       requireToolchainManifest(cpp.toolchainProfile);
@@ -252,6 +264,11 @@ export class Engine {
     this.objects = new CppObjectCache(typeof cpp?.objectCache === 'object' ? cpp.objectCache : {});
     this.debugger = new Debugger();
     this.lang = lang;
+  }
+
+  /** A retained worker reuses clang, compiled once on this thread and cloned to it. */
+  private get cacheCompilerModule(): boolean {
+    return this.options?.cacheCompilerModule ?? this.retain;
   }
 
   public get cacheStats(): CppCacheStatistics {
@@ -274,7 +291,7 @@ export class Engine {
       compilerModuleCloned: this.compilerModuleCloned,
       workerRetained: !!this.slot && !this.active,
       workerRetirements: this.retirements,
-      compilerModuleIdentityBytes: this.options?.cacheCompilerModule
+      compilerModuleIdentityBytes: this.cacheCompilerModule
         ? (this.toolchain?.compilerBytes ?? 0)
         : 0,
       latest: this.active?.stats ?? this.latest
@@ -688,7 +705,7 @@ export class Engine {
     this.toolchainController = new AbortController();
     const pending = VerifiedToolchain.load(
       prefetch_urls('c'),
-      !!this.options?.cacheCompilerModule,
+      this.cacheCompilerModule,
       this.toolchainController.signal,
       cpp_exception_hash(),
       this.options?.toolchainProfile
@@ -745,7 +762,7 @@ export class Engine {
         if (slot.toolchain !== toolchain) {
           this.compilerModuleCloned = toolchain.configure(slot.worker, {
             type: 'configure_cpp',
-            cacheCompilerModule: !!this.options?.cacheCompilerModule
+            cacheCompilerModule: this.cacheCompilerModule
           });
           slot.toolchain = toolchain;
         }
@@ -809,21 +826,19 @@ export class Engine {
     this.objects.discardBatch();
     this.latest = job.stats;
     this.stdin[Internals].clear();
-    if (!healthy || !this.options?.retainWorker || this.lang !== 'c') this.retireWorker();
+    if (!healthy || !this.retain) this.retireWorker();
     if (
       !this.disposed &&
       job.cacheEpoch === this.generation &&
-      this.toolchain &&
-      this.options?.compilerLifetime !== 'project' &&
-      (this.options?.retainWorker || this.options?.cacheCompilerModule)
+      (this.slot || (this.toolchain && this.cacheCompilerModule)) &&
+      this.options?.compilerLifetime !== 'project'
     )
       this.idleTimer = setTimeout(() => {
         this.retireWorker();
         this.toolchain = undefined;
         this.toolchainLoading = undefined;
-      }, this.options.idleTimeoutMs);
-    if (!this.options?.retainWorker && !this.options?.cacheCompilerModule)
-      this.toolchain = undefined;
+      }, this.idleTimeoutMs);
+    if (!this.retain && !this.cacheCompilerModule) this.toolchain = undefined;
     if (job.cacheEpoch !== this.generation) {
       this.toolchainController?.abort();
       this.toolchainLoading = undefined;

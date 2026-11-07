@@ -894,3 +894,33 @@ test('invalid optional certificate metadata cannot change ordinary job transport
     await engine.dispose();
   }
 });
+
+test('every language keeps its worker between clean runs by default, until idle', async () => {
+  const stop = (worker) => worker.emit({ type: 'stop', exit_code: 0, build_ms: 1, run_ms: 1 });
+  const engine = await Engine.create('python', { idleTimeoutMs: 20 });
+  engine.debugger.enabled = false;
+  let job = engine.run();
+  const worker = workers.at(-1);
+  await ready(worker);
+  stop(worker);
+  await job;
+  assert.equal(engine.cacheStats.workerRetained, true);
+  job = engine.run();
+  assert.equal(workers.at(-1), worker);
+  await new Promise((resolve) => setImmediate(resolve));
+  stop(worker);
+  await job;
+  assert.equal(worker.terminated, false);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.ok(worker.terminated);
+  await engine.dispose();
+
+  const optedOut = await Engine.create('python', { retainWorker: false });
+  optedOut.debugger.enabled = false;
+  job = optedOut.run();
+  await ready(workers.at(-1));
+  stop(workers.at(-1));
+  await job;
+  assert.ok(workers.at(-1).terminated);
+  await optedOut.dispose();
+});
