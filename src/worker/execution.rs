@@ -510,8 +510,14 @@ async fn sleep_ms(ms: i32) {
 }
 
 pub async fn extract_tar_gz(data: Vec<u8>) -> Result<mem_fs::FileSystem, std::io::Error> {
-    let decoder = GzDecoder::new(Cursor::new(data));
-    let mut archive = Archive::new(decoder);
+    // Also accept a plain tar: one served with `Content-Encoding: br` arrives already decoded
+    // by the browser, so it is both smaller on the wire and not inflated by flate2 in wasm.
+    let reader: Box<dyn Read> = if data.starts_with(&[0x1f, 0x8b]) {
+        Box::new(GzDecoder::new(Cursor::new(data)))
+    } else {
+        Box::new(Cursor::new(data))
+    };
+    let mut archive = Archive::new(reader);
 
     let fs = mem_fs::FileSystem::default();
 
