@@ -1,4 +1,23 @@
-import bdb, json
+import bdb, json, os, sys
+
+_user_files = {}
+
+
+def is_user_file(path):
+    """main.py and the modules beside it or in folders, as opposed to the standard library.
+
+    The standard library is zipped, and its code reports the paths it was built from,
+    which don't exist here. The student's files are the real files outside the install.
+    """
+    known = _user_files.get(path)
+    if known is None:
+        known = _user_files[path] = (
+            path.startswith('/')
+            and path != '/_bridge.py'
+            and not path.startswith(sys.prefix + '/')
+            and os.path.isfile(path)
+        )
+    return known
 
 # Resume commands from the main thread. Must match PYTHON_CMD_* in debug.rs.
 CONTINUE   = 0
@@ -179,7 +198,10 @@ class DapBridge(bdb.Bdb):
         self._pause(frame)
 
     def user_exception(self, frame, exc_info):
-        self._pause(frame)
+        # No pause: there are no exception breakpoints, and the standard library raises
+        # and catches exceptions all the time (imports probing for optional modules, for
+        # one). An uncaught exception still ends the run with its traceback.
+        pass
 
     def _pause(self, frame):
         self._nodes = 0
@@ -197,7 +219,7 @@ class DapBridge(bdb.Bdb):
                 "file": path,
                 "line": f.f_lineno,
                 "function": display,
-                "user": f.f_code.co_filename == '/main.py',
+                "user": is_user_file(path),
                 "locals": [
                     self._format(n, v, 0)
                     for n, v in f.f_locals.items()
