@@ -230,6 +230,15 @@ async fn start_native(msg: WorkerStart) {
         }
         sources = selected;
     } else { sources.sort(); }
+    // A Rust crate builds from its root and rustc loads `mod` files itself. Compiling each
+    // .rs file on its own would make every module a separate crate with no `main`.
+    if msg.lang == Lang::Rust {
+        let root = "/main.rs".to_string();
+        if !sources.contains(&root) {
+            return WorkerOut::Error { message: "Rust needs a main.rs crate root".into() }.send();
+        }
+        sources = vec![root];
+    }
     for path in artifacts.archives.iter().flatten().chain(artifacts.precompiled_header.iter()) {
         if !msg.binary_files.contains_key(path) {
             return WorkerOut::Error { message: format!("Missing binary build input: {path}") }.send();
@@ -379,7 +388,10 @@ fn cpp_clang_args(source: &str, is_debug: bool, artifacts: &CppArtifacts, depfil
         "-cc1", "-triple", "wasm32-wasip1", "-Werror", "-emit-obj", "-disable-free", "-isysroot", "/",
         "-internal-isystem", "/include/c++/v1", "-internal-isystem", "/include", "-internal-isystem", "/include/wasm32-wasip1",
         "-ferror-limit", "4", "-fcolor-diagnostics", "-x", "c++", "-std=c++23", "-fexceptions", "-fcxx-exceptions", "-exception-model=wasm",
-        "-target-feature", "+exception-handling", "-mllvm", "-wasm-enable-eh", "-mllvm", "-wasm-use-legacy-eh=true", "-o",
+        "-target-feature", "+exception-handling", "-mllvm", "-wasm-enable-eh", "-mllvm", "-wasm-use-legacy-eh=true",
+        // Quoted includes also resolve from the workspace root, so `lib/list.cpp` can include
+        // "vector.h" or "lib/list.h" the same way `main.cpp` does.
+        "-iquote", "/", "-o",
     ].into_iter().map(String::from).collect();
     args.push(format!("{source}.o"));
     if is_debug { args.extend(["-O0", "-debug-info-kind=standalone", "-dwarf-version=5"].into_iter().map(String::from)); }
