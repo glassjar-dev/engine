@@ -91,7 +91,7 @@ offset_type!(
     CodeOffset
 );
 
-#[derive(Debug, Tsify, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Tsify, Deserialize)]
 #[serde(untagged)]
 pub enum FsNode {
     File(String),

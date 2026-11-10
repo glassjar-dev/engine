@@ -18,6 +18,7 @@ mod cpp_stock_job;
 pub(crate) mod execution;
 pub(crate) mod host_device;
 mod io;
+mod last_build;
 mod read_only_fs;
 mod runtime;
 
@@ -219,7 +220,7 @@ async fn start(msg: WorkerStart) {
     }
 }
 
-async fn start_native(msg: WorkerStart) {
+async fn start_native(mut msg: WorkerStart) {
     let build_start = Instant::now();
     let mut sources = Vec::new();
     collect_dir_sources(&msg.fs, &PathBuf::from("/"), msg.lang, &mut sources);
@@ -260,11 +261,14 @@ async fn start_native(msg: WorkerStart) {
         "No {lang_name} source files found in provided filesystem"
     );
 
-    let fs = create_user_fs(FsNode::Dir(msg.fs))
+    // Plain C++ runs may reuse the worker's last build when every input is unchanged.
+    let reusable = msg.lang == Lang::C && msg.cpp_cache.is_none() && !msg.build_only && !msg.prepare_compiler && !stock_profile;
+    let fs_snapshot = reusable.then(|| msg.fs.clone());
+    let fs = create_user_fs(FsNode::Dir(std::mem::take(&mut msg.fs)))
         .await
         .expect("created user files filesystem");
 
-    for (path, bytes) in msg.binary_files {
+    for (path, bytes) in &msg.binary_files {
         if !path.starts_with('/') || path.split('/').skip(1).any(|part| matches!(part, "" | "." | "..")) {
             return WorkerOut::Error { message: format!("Invalid binary input path: {path}") }.send();
         }
@@ -280,6 +284,18 @@ async fn start_native(msg: WorkerStart) {
 
     let exec = Execution::new(msg.stdin_buffer);
     let is_debug = msg.is_debug;
+    let reuse = fs_snapshot.and_then(|fs| {
+        let toolchain = execution::compiler_toolchain()?;
+        Some(last_build::BuildInputs {
+            fs,
+            binary_files: std::mem::take(&mut msg.binary_files),
+            sources: sources.clone(),
+            archives: artifacts.archives.clone(),
+            precompiled_header: artifacts.precompiled_header.clone(),
+            is_debug,
+            toolchain: toolchain.identities.clone(),
+        })
+    });
 
     match msg.lang {
         Lang::C => {
@@ -293,7 +309,7 @@ async fn start_native(msg: WorkerStart) {
                 }
             };
             let toolchain = execution::compiler_toolchain().expect("verified toolchain");
-            start_cpp(is_debug, msg.build_only, msg.prepare_compiler, build_start, sources, exec, fs, host_device, artifacts, msg.cpp_cache, cache_inputs, stock_inputs, toolchain, input_hash_ms).await;
+            start_cpp(is_debug, msg.build_only, msg.prepare_compiler, build_start, sources, exec, fs, host_device, artifacts, msg.cpp_cache, cache_inputs, stock_inputs, toolchain, input_hash_ms, reuse).await;
         }
         Lang::Rust => start_rust(is_debug, build_start, sources, exec, fs).await,
         Lang::Python => unreachable!(),
@@ -601,7 +617,9 @@ async fn start_cpp(
     stock_inputs: Option<Result<cpp_cache_inputs::UserInputs, cpp_cache_inputs::Bypass>>,
     toolchain: std::rc::Rc<execution::CompilerToolchain>,
     input_hash_ms: f64,
+    reuse: Option<last_build::BuildInputs>,
 ) {
+    let reused = reuse.as_ref().and_then(last_build::lookup);
     let hash_start = Instant::now();
     let identities = request.as_ref().map(|_| &toolchain.identities);
     let mut cache = request.map(|request| CppCacheJob {
@@ -641,6 +659,7 @@ async fn start_cpp(
     cpp_phase("object_build_start", 0, sources.len());
     for (source_index, source) in sources.iter().enumerate() {
         yield_to_messages().await;
+        if reused.is_some() { continue; }
         if toolchain.stock_profile {
             if let Some(exit) = compile_stock_source(&exec, &mut cache, stock_job.as_mut(), source, source_index, sources.len(), is_debug, &artifacts).await {
                 if let Some(cache) = cache { cache.send(); }
@@ -789,9 +808,14 @@ async fn start_cpp(
     cpp_phase("link_start", sources.len(), sources.len());
     let link_start = Instant::now();
     if let Some(cache) = &mut cache { cache.stats.link_invocations += 1; }
-    let mut linker = exec.step("wasm-ld").binary("/llvm.core.wasm").compiler().args(&link_args);
-    if toolchain.stock_profile { linker = linker.compiler_stock(None); }
-    let exit = linker.run().await.expect("Linking succeeded");
+    let exit = if let Some(wasm) = &reused {
+        exec.write_bytes("/main.wasm", wasm).await.expect("Restored the unchanged build");
+        None
+    } else {
+        let mut linker = exec.step("wasm-ld").binary("/llvm.core.wasm").compiler().args(&link_args);
+        if toolchain.stock_profile { linker = linker.compiler_stock(None); }
+        Some(linker.run().await.expect("Linking succeeded"))
+    };
     if let Some(cache) = &mut cache {
         cache.stats.link_ms = link_start.elapsed().as_secs_f64() * 1000.0;
         // A noncooperative/GUI guest may never return, and Stop can terminate
@@ -799,9 +823,12 @@ async fn start_cpp(
         WorkerOut::CppCacheStats { generation: cache.generation, stats: cache.stats.clone() }.send();
     }
     cpp_phase("link_complete", sources.len(), sources.len());
-    if !exit.is_success() {
+    if let Some(exit) = exit.filter(|exit| !exit.is_success()) {
         if let Some(cache) = cache { cache.send(); }
         return stop(exit.raw(), build_start, None).send();
+    }
+    if let (None, Some(inputs)) = (&reused, reuse) {
+        if let Ok(wasm) = exec.read_bytes("/main.wasm").await { last_build::remember(inputs, wasm); }
     }
 
     let run_start = Instant::now();
