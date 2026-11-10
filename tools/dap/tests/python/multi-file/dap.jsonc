@@ -1,0 +1,41 @@
+// A module in a folder is the student's code too: it pauses at its own path and
+// its frame is not hidden as internal.
+{
+  "lang": "python",
+  "steps": [
+    {
+      "type": "request",
+      "command": "setBreakpoints",
+      "arguments": {
+        "source": { "path": "/helpers/greet.py" },
+        "breakpoints": [{ "line": 3 }]
+      }
+    },
+    { "type": "response", "body": {} },
+    { "type": "request", "command": "configurationDone", "arguments": {} },
+    {
+      "type": "event",
+      "event": "stopped",
+      "body": { "reason": "breakpoint", "threadId": "${{thread}}" },
+      "$timeout": 30000
+    },
+    {
+      "type": "request",
+      "command": "stackTrace",
+      "arguments": { "threadId": "{{thread}}" }
+    },
+    { "type": "response", "body": { "stackFrames": "${{frames}}" } },
+    {
+      // greet pauses at its own path, and only the student's frames count as code:
+      // the debugger's own (bdb's run) and the standard library's are internal.
+      "type": "expect",
+      "run": "frames[0].name === 'greet' && frames[0].line === 3 && frames[0].source.path === '/helpers/greet.py' && frames.filter(f => f.presentationHint === 'normal').map(f => f.name).join(',') === 'greet,__main__'",
+      "expect": true
+    },
+    {
+      "type": "request",
+      "command": "continue",
+      "arguments": { "threadId": "{{thread}}" }
+    }
+  ]
+}

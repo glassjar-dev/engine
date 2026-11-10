@@ -1,0 +1,41 @@
+// Importing random and dataclasses raises and catches exceptions inside the standard
+// library. None of that may pause: the first stop is the breakpoint.
+{
+  "lang": "python",
+  "steps": [
+    {
+      "type": "request",
+      "command": "setBreakpoints",
+      "arguments": {
+        "source": { "path": "main.py" },
+        "breakpoints": [{ "line": 11 }]
+      }
+    },
+    { "type": "response", "body": {} },
+    { "type": "request", "command": "configurationDone", "arguments": {} },
+    {
+      "type": "event",
+      "event": "stopped",
+      "body": { "reason": "breakpoint", "threadId": "${{thread}}" },
+      "$timeout": 30000
+    },
+    {
+      "type": "request",
+      "command": "stackTrace",
+      "arguments": { "threadId": "{{thread}}" }
+    },
+    {
+      "type": "response",
+      "body": {
+        "stackFrames": {
+          "$array.contains": [{ "name": "__main__", "line": 11 }]
+        }
+      }
+    },
+    {
+      "type": "request",
+      "command": "continue",
+      "arguments": { "threadId": "{{thread}}" }
+    }
+  ]
+}

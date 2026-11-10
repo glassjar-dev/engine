@@ -60,8 +60,10 @@ addEventListener(
 );
 
 try {
-  const hostWasm = self.name.startsWith(WASM_WORKER_NAME_PREFIX)
-    ? resolveWasmUrl(self.name.slice(WASM_WORKER_NAME_PREFIX.length))
+  // Some runtimes (Bun, used by tools/dap) leave unnamed workers without a name.
+  const name = self.name ?? '';
+  const hostWasm = name.startsWith(WASM_WORKER_NAME_PREFIX)
+    ? resolveWasmUrl(name.slice(WASM_WORKER_NAME_PREFIX.length))
     : undefined;
   await init({ module_or_path: hostWasm ?? wasmBinary });
   wasm.set_compiler_module_constructor((bytes: Uint8Array) =>
