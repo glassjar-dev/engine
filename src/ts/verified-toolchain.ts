@@ -30,7 +30,7 @@ export class VerifiedToolchain {
     const manifest = requireToolchainManifest(profile);
     if (urls.length !== 2) throw new Error('Missing C++ toolchain assets');
     let fetchFailure: { error: unknown } | undefined;
-    let streamed: Promise<WebAssembly.Module> | undefined;
+    let streamed: Promise<WebAssembly.Module | undefined> | undefined;
     const assets = await Promise.allSettled(
       urls.map(async (url, index) => {
         try {
@@ -39,9 +39,15 @@ export class VerifiedToolchain {
           // Compiling the compiler from the stream lets the browser keep its machine code
           // for later visits. Both branches carry the same bytes; the module never runs
           // before those bytes pass the integrity check below.
-          if (index === 0 && cacheModule) {
-            streamed = WebAssembly.compileStreaming(response.clone());
-            streamed.catch(() => undefined);
+          if (
+            index === 0 &&
+            cacheModule &&
+            typeof WebAssembly.compileStreaming === 'function' &&
+            typeof response.clone === 'function'
+          ) {
+            // A refused stream (e.g. a host that does not send application/wasm) falls
+            // back to compiling the downloaded bytes below.
+            streamed = WebAssembly.compileStreaming(response.clone()).catch(() => undefined);
           }
           return new Uint8Array(await response.arrayBuffer());
         } catch (error) {
@@ -59,8 +65,9 @@ export class VerifiedToolchain {
     const [ingestion, compilation] = await Promise.allSettled([
       VerifiedToolchain.ingestOwned(compiler, sysroot, false, exceptionsHash),
       cacheModule
-        ? (streamed ??
-          Promise.resolve().then(() => WebAssembly.compile(compiler as Uint8Array<ArrayBuffer>)))
+        ? (streamed ?? Promise.resolve(undefined)).then(
+            (module) => module ?? WebAssembly.compile(compiler as Uint8Array<ArrayBuffer>)
+          )
         : Promise.resolve(undefined)
     ]);
     if (ingestion.status === 'rejected') throw ingestion.reason;

@@ -354,3 +354,55 @@ test('unknown toolchain profile fails before fetching or trusting caller bytes',
     globalThis.fetch = original;
   }
 });
+
+function streamingLoad(t: TestContext, stream: 'resolve' | 'reject', badCompiler = false) {
+  const nativeCompile = WebAssembly.compile.bind(WebAssembly);
+  let compileCalls = 0;
+  let streamCalls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: string) => {
+    const bytes = url.endsWith('compiler')
+      ? badCompiler
+        ? new Uint8Array([0])
+        : minimal()
+      : new Uint8Array([1, 2]);
+    const response = { ok: true, arrayBuffer: async () => bytes.buffer, clone: () => response };
+    return response;
+  });
+  t.mock.method(WebAssembly, 'compileStreaming', async () => {
+    streamCalls++;
+    if (stream === 'reject') throw new TypeError('Incorrect response MIME type');
+    return nativeCompile(minimal());
+  });
+  t.mock.method(WebAssembly, 'compile', (...args: Parameters<typeof nativeCompile>) => {
+    compileCalls++;
+    return nativeCompile(...args);
+  });
+  const result = LoadToolchain.load(
+    ['https://fixture.test/compiler', 'https://fixture.test/sysroot'],
+    true
+  );
+  return { result, calls: () => ({ streamCalls, compileCalls }) };
+}
+
+test('load compiles the compiler from its download stream when the response allows it', async (t) => {
+  const load = streamingLoad(t, 'resolve');
+  const owner = await load.result;
+  const messages: SeedMessage[] = [];
+  owner.configure({ postMessage: (value: SeedMessage) => messages.push(value) } as unknown as Worker, {});
+  assert.ok(messages[0].toolchain.module instanceof WebAssembly.Module);
+  assert.deepEqual(load.calls(), { streamCalls: 1, compileCalls: 0 });
+});
+
+test('a refused stream falls back to compiling the downloaded bytes', async (t) => {
+  const load = streamingLoad(t, 'reject');
+  const owner = await load.result;
+  const messages: SeedMessage[] = [];
+  owner.configure({ postMessage: (value: SeedMessage) => messages.push(value) } as unknown as Worker, {});
+  assert.ok(messages[0].toolchain.module instanceof WebAssembly.Module);
+  assert.deepEqual(load.calls(), { streamCalls: 1, compileCalls: 1 });
+});
+
+test('a streamed module never escapes a failed integrity check', async (t) => {
+  const load = streamingLoad(t, 'resolve', true);
+  await assert.rejects(load.result, /toolchain integrity mismatch/);
+});
