@@ -161,7 +161,7 @@ synchronously closes the scope, drains pending work, clears callbacks/inputs and
 permanently prevents reuse. Scope, operation and cache identities fence effects
 independently, and retired worker slots cannot impersonate replacements.
 
-Errors, nonzero outcomes and Debug retire the worker but preserve committed valid
+Errors retire the worker; nonzero outcomes keep it. Both preserve committed valid
 objects and immutable code. Idle retention defaults to 30 seconds, configurable
 from 1 ms to 5 minutes. Explicit `compilerLifetime: 'project'` omits that timer;
 the host must implement visibility release and permanent disposal. No heartbeat,

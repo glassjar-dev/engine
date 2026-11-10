@@ -380,7 +380,7 @@ test('binary snapshots own Buffer and subclass bytes before worker readiness', a
   await engine.dispose();
 });
 
-test('Debug retires its worker while preserving the verified compiler owner', async () => {
+test('Debug reuses the retained worker and its verified compiler owner', async () => {
   const engine = await Engine.create('c', options({ cacheCompilerModule: true }));
   engine.debugger.enabled = false;
   const first = engine.compile();
@@ -395,16 +395,23 @@ test('Debug retires its worker while preserving the verified compiler owner', as
   await first;
   assert.equal(engine.cacheStats.compilerModuleIdentityBytes, 8);
   engine.debugger.enabled = true;
+  const configurations = retained.messages.filter(
+    (message) => message.type === 'configure_cpp'
+  ).length;
   const debug = engine.run();
-  assert.equal(retained.terminated, true);
+  assert.equal(workers.at(-1), retained);
+  assert.equal(retained.terminated, false);
   assert.equal(engine.cacheStats.compilerModuleIdentityBytes, 8);
-  const worker = workers.at(-1);
-  await ready(worker);
-  const configuration = worker.messages.find((message) => message.type === 'configure_cpp');
-  assert.equal(configuration.cacheCompilerModule, true);
-  assert.equal(configuration.compilerModule, undefined);
-  await complete(worker);
+  await new Promise((resolve) => setImmediate(resolve));
+  // The warm worker already holds the verified compiler; it is not configured again.
+  assert.equal(
+    retained.messages.filter((message) => message.type === 'configure_cpp').length,
+    configurations
+  );
+  assert.equal(retained.messages.at(-1).is_debug, true);
+  await complete(retained);
   await debug;
+  assert.equal(retained.terminated, false);
   await engine.dispose();
 });
 
@@ -465,7 +472,7 @@ test('successful repeated jobs reuse worker with stable listeners and fresh stdi
   assert.equal(engine.cacheStats.entries, 0);
 });
 
-test('nonzero outcomes never populate; errors recover; Debug retires retained worker', async () => {
+test('nonzero outcomes never populate but keep the worker; errors recover; Debug keeps the retained worker', async () => {
   const engine = await Engine.create('c', options());
   engine.debugger.enabled = false;
   let job = engine.run();
@@ -475,12 +482,13 @@ test('nonzero outcomes never populate; errors recover; Debug retires retained wo
   worker.emit({ type: 'stop', exit_code: 1, build_ms: 1, run_ms: 0 });
   await job;
   assert.equal(engine.cacheStats.entries, 0);
-  assert.ok(worker.terminated);
+  assert.equal(worker.terminated, false);
   job = engine.run();
-  worker = workers.at(-1);
-  await ready(worker);
+  assert.equal(workers.at(-1), worker);
+  await new Promise((resolve) => setImmediate(resolve));
   worker.emit({ type: 'error', message: 'failure' });
   assert.equal((await job).type, 'error');
+  assert.ok(worker.terminated);
   job = engine.run();
   worker = workers.at(-1);
   await ready(worker);
@@ -488,13 +496,13 @@ test('nonzero outcomes never populate; errors recover; Debug retires retained wo
   await job;
   engine.debugger.enabled = true;
   job = engine.run();
-  assert.ok(worker.terminated);
-  worker = workers.at(-1);
-  await ready(worker);
+  assert.equal(workers.at(-1), worker);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(worker.messages.at(-1).is_debug, true);
   assert.equal(worker.messages.at(-1).cpp_cache, null);
   await complete(worker);
   await job;
-  assert.ok(worker.terminated);
+  assert.equal(worker.terminated, false);
   await engine.dispose();
 });
 
@@ -603,8 +611,8 @@ test('Debug completion still emits DAP terminated before listener retirement', a
   await complete(worker);
   assert.equal((await job).type, 'completed');
   assert.equal(terminated, 1);
-  assert.equal(worker.count(), 0);
   await engine.dispose();
+  assert.equal(worker.count(), 0);
 });
 
 test('compiler preparation has no student inputs/devices and uses the ordinary busy lane', async () => {

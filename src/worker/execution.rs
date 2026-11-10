@@ -113,6 +113,7 @@ pub struct Step<'a> {
     debug: bool,
     compiler: bool,
     stock_profile: bool,
+    quiet: bool,
     stock_trace: Option<InvocationTrace>,
     envs: Vec<(String, String)>,
     device_files: Vec<(PathBuf, Box<dyn wasmer_wasix::virtual_fs::VirtualFile + Send + Sync>)>,
@@ -142,6 +143,7 @@ impl Execution {
             debug: false,
             compiler: false,
             stock_profile: false,
+            quiet: false,
             stock_trace: None,
             envs: Vec::new(),
             device_files: Vec::new(),
@@ -195,6 +197,12 @@ impl<'a> Step<'a> {
     /// Only LLVM compiler/linker steps may use immutable compiler Module retention.
     pub fn compiler(mut self) -> Self {
         self.compiler = true;
+        self
+    }
+
+    /// Discard this step's output: background work the student never asked to see.
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
         self
     }
 
@@ -396,6 +404,11 @@ impl<'a> Step<'a> {
             .stdin(Box::new(Stdin::new(&self.exec.stdin_buffer)));
         if self.stock_profile {
             builder = builder.stdin(Box::new(wasmer_wasix::virtual_fs::NullFile::default()));
+        }
+        if self.quiet {
+            builder = builder
+                .stdout(Box::new(wasmer_wasix::virtual_fs::NullFile::default()))
+                .stderr(Box::new(wasmer_wasix::virtual_fs::NullFile::default()));
         }
 
         builder

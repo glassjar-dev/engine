@@ -61,7 +61,7 @@ export interface EngineOptions {
   /**
    * Keep the worker and its compiled compilers between runs, so later runs skip worker
    * startup and compiler setup. Every run still gets a fresh instance, memory and
-   * filesystem. Defaults to true; errors, Debug runs and `stop()` still replace the worker.
+   * filesystem. Defaults to true; errors and `stop()` still replace the worker.
    */
   retainWorker?: boolean;
   /** How long a retained worker may sit idle; defaults to 30 seconds, at most five minutes. */
@@ -476,9 +476,6 @@ export class Engine {
     )
       return Promise.resolve(errorResult(new TypeError('Invalid host device configuration')));
     clearTimeout(this.idleTimer);
-    if (debug) {
-      this.retireWorker();
-    }
     this.stdin[Internals].clear();
     const reused = !!this.slot;
     let resolve!: (value: RunResult) => void;
@@ -645,7 +642,7 @@ export class Engine {
     };
     const onMessageError = () =>
       onError({ message: 'Unreadable execution worker message' } as ErrorEvent);
-    // DAP must observe completion before central cleanup retires a Debug worker.
+    // DAP must observe completion before central cleanup can retire the worker.
     this.debugger[Internals].attach(worker);
     worker.addEventListener('message', onMessage);
     worker.addEventListener('error', onError);
@@ -812,12 +809,11 @@ export class Engine {
     }
     const cleanupError = job.device?.close();
     if (cleanupError) result = errorResult(cleanupError);
-    const healthy =
-      result.type === 'completed' &&
-      result.exitCode === 0 &&
-      !job.debug &&
-      job.generation === this.generation &&
-      !this.disposed;
+    // A completed run leaves the worker reusable whatever its exit code: every run gets a
+    // fresh instance and filesystem. Only clean runs refresh cached objects.
+    const reusable =
+      result.type === 'completed' && job.generation === this.generation && !this.disposed;
+    const healthy = reusable && result.type === 'completed' && result.exitCode === 0;
     if (job.generation === this.generation)
       for (const source of job.stats.cache?.invalid_sources ?? []) this.objects.delete(source);
     if (healthy) {
@@ -826,7 +822,7 @@ export class Engine {
     this.objects.discardBatch();
     this.latest = job.stats;
     this.stdin[Internals].clear();
-    if (!healthy || !this.retain) this.retireWorker();
+    if (!reusable || !this.retain) this.retireWorker();
     if (
       !this.disposed &&
       job.cacheEpoch === this.generation &&

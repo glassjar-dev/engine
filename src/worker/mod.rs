@@ -18,6 +18,7 @@ mod cpp_stock_job;
 pub(crate) mod execution;
 pub(crate) mod host_device;
 mod io;
+mod read_only_fs;
 mod runtime;
 
 use execution::{Execution, extract_tar_gz};
@@ -482,6 +483,97 @@ async fn compile_stock_source(
     None
 }
 
+type SharedFs = Arc<dyn FileSystem + Send + Sync>;
+
+thread_local! {
+    // The verified sysroot and exception runtime, unpacked once per worker (about 50 ms
+    // each time otherwise) and keyed by the sysroot hash. Runs see them read-only.
+    static CPP_SYSROOT: std::cell::RefCell<Option<(String, SharedFs, SharedFs)>> = const { std::cell::RefCell::new(None) };
+}
+
+async fn cpp_sysroot(toolchain: &execution::CompilerToolchain) -> (SharedFs, SharedFs) {
+    let identity = &toolchain.identities.1;
+    let cached = CPP_SYSROOT.with(|slot| slot.borrow().as_ref().filter(|(id, ..)| id == identity).map(|(_, s, e)| (s.clone(), e.clone())));
+    if let Some(cached) = cached { return cached; }
+    let sysroot = extract_tar_gz(toolchain.sysroot.clone()).await.expect("C++ sysroot filesystem");
+    let exceptions = extract_tar_gz(include_bytes!("../../assets/cpp-exceptions/runtime.tar.gz").to_vec()).await.expect("embedded C++ exception runtime");
+    let sysroot: SharedFs = Arc::new(read_only_fs::ReadOnlyFs(Arc::new(sysroot)));
+    let exceptions: SharedFs = Arc::new(read_only_fs::ReadOnlyFs(Arc::new(exceptions)));
+    CPP_SYSROOT.with(|slot| *slot.borrow_mut() = Some((identity.clone(), sysroot.clone(), exceptions.clone())));
+    (sysroot, exceptions)
+}
+
+const PREAMBLE_HEADER: &str = "/__glassjar/preamble.h";
+const PREAMBLE_PCH: &str = "/__glassjar/preamble.pch";
+
+thread_local! {
+    // Precompiled leading `#include <...>` blocks (clangd calls these preambles), so a file
+    // that starts with <iostream> parses it once per worker instead of on every run.
+    // Most recently used last; `None` remembers a block that failed to precompile.
+    static PREAMBLES: std::cell::RefCell<Vec<(String, Option<std::rc::Rc<Vec<u8>>>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The leading `#include <...>` lines of a source file, skipping blank lines and `//` comments.
+fn system_preamble(source: &str) -> String {
+    let mut preamble = String::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") { continue; }
+        let Some(header) = line.strip_prefix('#').and_then(|d| d.trim_start().strip_prefix("include")).map(str::trim_start) else { break };
+        let Some(end) = header.find('>').filter(|_| header.starts_with('<')) else { break };
+        let rest = header[end + 1..].trim();
+        if !rest.is_empty() && !rest.starts_with("//") { break; }
+        preamble.push_str(&format!("#include {}\n", &header[..=end]));
+    }
+    preamble
+}
+
+/// Mounts a precompiled header for the source's system include block, building it once per
+/// worker. False when there is no such block or it doesn't precompile.
+async fn use_preamble_pch(exec: &Execution, source: &str) -> bool {
+    let Ok(text) = exec.read_bytes(source).await else { return false };
+    let preamble = system_preamble(&String::from_utf8_lossy(&text));
+    if preamble.is_empty() { return false; }
+    let cached = PREAMBLES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let at = cache.iter().position(|(k, _)| *k == preamble)?;
+        let entry = cache.remove(at);
+        let pch = entry.1.clone();
+        cache.push(entry);
+        Some(pch)
+    });
+    if create_dir_all(&exec.fs, Path::new("/__glassjar")).is_err() || exec.write_bytes(PREAMBLE_HEADER, preamble.as_bytes()).await.is_err() { return false; }
+    let pch = match cached {
+        Some(pch) => pch,
+        None => {
+            // Quiet: an include that fails here fails again, visibly, in the real compile.
+            let mut args = cpp_clang_args(PREAMBLE_HEADER, false, &CppArtifacts::default(), false);
+            for arg in &mut args {
+                match arg.as_str() { "-emit-obj" => *arg = "-emit-pch".into(), "c++" => *arg = "c++-header".into(), _ => {} }
+            }
+            if let Some(out) = args.iter().position(|a| a == "-o") { args[out + 1] = PREAMBLE_PCH.into(); }
+            // Each run rewrites the header, so validate it by content rather than timestamp.
+            let at = args.len() - 1;
+            args.insert(at, "-fvalidate-ast-input-files-content".into());
+            let built = exec.step("clang").binary("/llvm.core.wasm").compiler().quiet().args(&args).run().await;
+            let pch = match built {
+                Ok(exit) if exit.is_success() => exec.read_bytes(PREAMBLE_PCH).await.ok().map(std::rc::Rc::new),
+                _ => None,
+            };
+            PREAMBLES.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.len() >= 4 { cache.remove(0); }
+                cache.push((preamble, pch.clone()));
+            });
+            pch
+        }
+    };
+    match pch {
+        Some(pch) => exec.write_bytes(PREAMBLE_PCH, &pch).await.is_ok(),
+        None => false,
+    }
+}
+
 async fn start_cpp(
     is_debug: bool,
     build_only: bool,
@@ -508,12 +600,9 @@ async fn start_cpp(
         metadata_limit: request.max_entry_metadata_bytes.unwrap_or(0).min(cpp_cache_inputs::MAX_METADATA_BYTES),
         stats: CppCacheStats { hash_ms: input_hash_ms + hash_start.elapsed().as_secs_f64() * 1000.0, ..Default::default() },
     });
-    let sysroot: Arc<dyn FileSystem + Send + Sync> = Arc::new(extract_tar_gz(toolchain.sysroot.clone()).await.expect("C++ sysroot filesystem"));
+    let (sysroot, exceptions) = cpp_sysroot(&toolchain).await;
     exec.fs.union(&sysroot);
     // These files add exception support without replacing the fetched sysroot.
-    let exceptions: Arc<dyn FileSystem + Send + Sync> = Arc::new(
-        extract_tar_gz(include_bytes!("../../assets/cpp-exceptions/runtime.tar.gz").to_vec()).await.expect("embedded C++ exception runtime"),
-    );
     exec.fs.union(&exceptions);
     let user_fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(fs);
     exec.fs.union(&user_fs);
@@ -553,7 +642,12 @@ async fn start_cpp(
             else if artifacts.precompiled_header.is_some() { Some("opaque-precompiled-header") }
             else if cache.is_some() && exec.fs.metadata(Path::new(&format!("{source}.o.d"))).is_ok() { Some("dependency-path-collision") }
             else { inputs.as_ref().and_then(|inputs| inputs.bypass(source)) };
-        let clang_args = cpp_clang_args(source, is_debug, &artifacts, cache.is_some() && bypass.is_none());
+        let mut clang_args = cpp_clang_args(source, is_debug, &artifacts, cache.is_some() && bypass.is_none());
+        // Debug builds skip it: a precompiled header with debug info costs seconds to build.
+        if cache.is_none() && !is_debug && artifacts.precompiled_header.is_none() && use_preamble_pch(&exec, source).await {
+            let at = clang_args.len() - 1;
+            clang_args.splice(at..at, ["-include-pch".into(), PREAMBLE_PCH.into(), "-fvalidate-ast-input-files-content".into()]);
+        }
         let key = if bypass.is_none() {
             inputs.as_ref().zip(identities.as_ref()).and_then(|(inputs, (compiler, sysroot, exceptions))| inputs.key(source, compiler, sysroot, exceptions, &clang_args, &link_args))
         } else { None };
