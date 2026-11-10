@@ -40,7 +40,8 @@ thread_local! {
     // each sysroot once. Keyed by the engine's fixed URLs; every run still gets a fresh Store,
     // filesystem and Instance, so no guest state carries over.
     static NETWORK_MODULES: RefCell<HashMap<String, Module>> = RefCell::new(HashMap::new());
-    static SYSROOTS: RefCell<HashMap<String, Rc<Vec<u8>>>> = RefCell::new(HashMap::new());
+    // Unpacked once per worker and shared read-only: a run's writes land in private copies.
+    static SYSROOTS: RefCell<HashMap<String, Arc<dyn FileSystem + Send + Sync>>> = RefCell::new(HashMap::new());
 }
 
 pub struct CompilerToolchain {
@@ -351,19 +352,17 @@ impl<'a> Step<'a> {
         /* Fetch the sysroot and union into the vfs if needed */
         if let Some(sysroot_loc) = &self.sysroot {
             let cached = SYSROOTS.with(|s| s.borrow().get(sysroot_loc).cloned());
-            let sysroot_bytes = match cached {
-                Some(bytes) => bytes,
+            let sysroot_fs = match cached {
+                Some(fs) => fs,
                 None => {
-                    let bytes = Rc::new(fetch_bytes(sysroot_loc).await.ensure("Fetched sysroot from network")?);
-                    SYSROOTS.with(|s| s.borrow_mut().insert(sysroot_loc.clone(), bytes.clone()));
-                    bytes
+                    let bytes = fetch_bytes(sysroot_loc).await.ensure("Fetched sysroot from network")?;
+                    let unpacked = extract_tar_gz(bytes).await.ensure("Created sysroot fs from tarball")?;
+                    let fs: Arc<dyn FileSystem + Send + Sync> =
+                        Arc::new(super::read_only_fs::ReadOnlyFs(Arc::new(unpacked)));
+                    SYSROOTS.with(|s| s.borrow_mut().insert(sysroot_loc.clone(), fs.clone()));
+                    fs
                 }
             };
-            // Extracted per run into a fresh filesystem, so guest writes never reach the cache.
-            let sysroot_fs = extract_tar_gz(sysroot_bytes.as_ref().clone())
-                .await
-                .ensure("Created sysroot fs from tarball")?;
-            let sysroot_fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(sysroot_fs);
             self.exec.fs.union(&sysroot_fs);
         }
 
