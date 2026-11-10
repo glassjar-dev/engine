@@ -655,8 +655,11 @@ async fn start_cpp(
             else if cache.is_some() && exec.fs.metadata(Path::new(&format!("{source}.o.d"))).is_ok() { Some("dependency-path-collision") }
             else { inputs.as_ref().and_then(|inputs| inputs.bypass(source)) };
         let mut clang_args = cpp_clang_args(source, is_debug, &artifacts, cache.is_some() && bypass.is_none());
-        // Debug builds skip it: a precompiled header with debug info costs seconds to build.
-        if cache.is_none() && !is_debug && artifacts.precompiled_header.is_none() && use_preamble_pch(&exec, source).await {
+        // Debug builds share the plain (no debug info) preamble: debug info is generated from
+        // the AST at code generation, so functions, variables, types and line tables come out
+        // the same. Only declarations nothing uses (such as `std::` using-declarations from C
+        // headers) are left out of the DWARF; the debugger never reads them.
+        if cache.is_none() && artifacts.precompiled_header.is_none() && use_preamble_pch(&exec, source).await {
             let at = clang_args.len() - 1;
             clang_args.splice(at..at, ["-include-pch".into(), PREAMBLE_PCH.into(), "-fvalidate-ast-input-files-content".into()]);
         }
