@@ -717,6 +717,8 @@ async fn start_rust(
         let obj_path = rust_obj_path(source);
         let mut rustc_args = vec![
             source.as_str(),
+            // Without this rustc defaults to the 2015 edition; `cargo new` uses 2024.
+            "--edition=2024",
             "--sysroot",
             "/",
             "--target",
