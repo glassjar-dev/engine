@@ -30,11 +30,19 @@ export class VerifiedToolchain {
     const manifest = requireToolchainManifest(profile);
     if (urls.length !== 2) throw new Error('Missing C++ toolchain assets');
     let fetchFailure: { error: unknown } | undefined;
+    let streamed: Promise<WebAssembly.Module> | undefined;
     const assets = await Promise.allSettled(
-      urls.map(async (url) => {
+      urls.map(async (url, index) => {
         try {
           const response = await fetch(url, { cache: 'force-cache', signal });
           if (!response.ok) throw new Error(`Cannot load C++ toolchain (${response.status})`);
+          // Compiling the compiler from the stream lets the browser keep its machine code
+          // for later visits. Both branches carry the same bytes; the module never runs
+          // before those bytes pass the integrity check below.
+          if (index === 0 && cacheModule) {
+            streamed = WebAssembly.compileStreaming(response.clone());
+            streamed.catch(() => undefined);
+          }
           return new Uint8Array(await response.arrayBuffer());
         } catch (error) {
           fetchFailure ??= { error };
@@ -51,7 +59,8 @@ export class VerifiedToolchain {
     const [ingestion, compilation] = await Promise.allSettled([
       VerifiedToolchain.ingestOwned(compiler, sysroot, false, exceptionsHash),
       cacheModule
-        ? Promise.resolve().then(() => WebAssembly.compile(compiler as Uint8Array<ArrayBuffer>))
+        ? (streamed ??
+          Promise.resolve().then(() => WebAssembly.compile(compiler as Uint8Array<ArrayBuffer>)))
         : Promise.resolve(undefined)
     ]);
     if (ingestion.status === 'rejected') throw ingestion.reason;
