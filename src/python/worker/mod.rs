@@ -11,8 +11,9 @@ use crate::worker::stop;
 use debuggee::PythonDebuggee;
 
 // Single source of truth for these is `prefetch_urls` in lib.rs (warmed by the host).
-pub(crate) const WASM_URL: &str = "https://cdn.yousefabuhashem.com/python/3.11.3/python-3.11.3.wasm";
-pub(crate) const STDLIB_URL: &str = "https://cdn.yousefabuhashem.com/python/3.11.3/python-3.11.3.tar.gz";
+// glassjar-dev/python: CPython 3.15 for WASI with zlib, bz2, lzma, sqlite3 and C decimal.
+pub(crate) const WASM_URL: &str = "https://cdn.yousefabuhashem.com/python/3.15.2-glassjar1/python.wasm";
+pub(crate) const STDLIB_URL: &str = "https://cdn.yousefabuhashem.com/python/3.15.2-glassjar1/python-stdlib.tar.gz";
 
 async fn write_file(fs: &mem_fs::FileSystem, path: &str, contents: &str) -> std::io::Result<()> {
     let mut file = fs
