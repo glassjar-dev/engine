@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tar::Archive;
 use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 use wasm_bindgen_futures::JsFuture;
-use wasmer::{Module, RuntimeError, Store};
+use wasmer::{Extern, Function, FunctionEnv, FunctionEnvMut, Imports, Module, RuntimeError, Store, Value};
 use wasmer_wasix::types::wasi::ExitCode;
 use wasmer_wasix::virtual_fs::AsyncReadExt;
 use wasmer_wasix::{
@@ -372,6 +372,15 @@ impl<'a> Step<'a> {
             self.exec.fs.union(&union_fs);
         }
 
+        // Programs expect /dev/null (os.devnull, logging to nowhere, shells redirecting).
+        if self.exec.fs.metadata(std::path::Path::new("/dev/null")).is_err() {
+            create_dir_all(&self.exec.fs, std::path::Path::new("/dev")).ensure("Created /dev")?;
+            self.exec
+                .fs
+                .new_open_options_ext()
+                .insert_device_file(PathBuf::from("/dev/null"), Box::new(wasmer_wasix::virtual_fs::NullFile::default()))
+                .ensure("Registered /dev/null")?;
+        }
         for (path, file) in self.device_files {
             if let Some(parent) = path.parent() {
                 create_dir_all(&self.exec.fs, parent).ensure("Created device parent directory")?;
@@ -424,6 +433,7 @@ impl<'a> Step<'a> {
                 .ensure("Created WASI import object")?;
 
             debugger.attach(&mut store, &mut imports);
+            immediate_zero_timeout_polls(&mut store, &wasi_func_env.env, &mut imports);
 
             let instance = wasmer::Instance::new(&mut store, &module, &imports)
                 .ensure("Created instance with debug imports")?;
@@ -438,14 +448,19 @@ impl<'a> Step<'a> {
             let mut wasi_func_env = WasiFunctionEnv::new(&mut store, wasi_env);
             let mut imports = wasi_func_env.import_object(&mut store, &module).ensure("Created stock compiler WASI imports")?;
             let trace = TraceImport::attach(&mut store, &mut imports, &module, self.stock_trace.take().expect("stock trace"));
+            immediate_zero_timeout_polls(&mut store, &wasi_func_env.env, &mut imports);
             let instance = wasmer::Instance::new(&mut store, &module, &imports).ensure("Created stock compiler instance with observation")?;
             TraceImport::bind(&trace, &mut store, &instance);
             wasi_func_env.initialize(&mut store, instance.clone()).ensure("Initialized stock compiler WASI")?;
             instance
         } else {
-            let (instance, _env) = builder
-                .instantiate(module, &mut store)
-                .ensure("Instantiated Wasmer instance")?;
+            // Built by hand, like the debug path, so poll_oneoff can be wrapped.
+            let wasi_env = builder.build().ensure("Built WASI environment")?;
+            let mut wasi_func_env = WasiFunctionEnv::new(&mut store, wasi_env);
+            let mut imports = wasi_func_env.import_object(&mut store, &module).ensure("Created WASI import object")?;
+            immediate_zero_timeout_polls(&mut store, &wasi_func_env.env, &mut imports);
+            let instance = wasmer::Instance::new(&mut store, &module, &imports).ensure("Created Wasmer instance")?;
+            wasi_func_env.initialize(&mut store, instance.clone()).ensure("Initialized WASI")?;
             instance
         };
 
@@ -569,4 +584,60 @@ impl<T, E: Debug> Ensure<T> for Result<T, E> {
     fn ensure(self, message: &str) -> Result<T, RuntimeError> {
         self.map_err(|e| RuntimeError::new(format!("{message}: {:?}", e)))
     }
+}
+
+/// Fixes two ways Wasmer's poll_oneoff panics a worker. It reads a relative clock subscription
+/// with a zero timeout, which is how C libraries ask "is anything ready right now?"
+/// (poll(fds, n, 0), select(..., 0)), as a wait with no deadline, which blocks the worker's
+/// only thread; and it underflows on an absolute deadline that has already passed (sleep(0)).
+/// Zero becomes 1ns, Wasmer's own "check now", and absolute deadlines become relative.
+/// Python's selectors, asyncio, subprocess and time.sleep(0) need this.
+fn immediate_zero_timeout_polls(store: &mut Store, env: &FunctionEnv<WasiEnv>, imports: &mut Imports) {
+    let Some(Extern::Function(wasi_poll)) = imports.get_export("wasi_snapshot_preview1", "poll_oneoff") else {
+        return;
+    };
+    // The JS backend only takes plain functions, so the wrapped import travels in the env.
+    let poll_env = FunctionEnv::new(store, PollEnv { wasi: env.clone(), wasi_poll });
+    let wrapped = Function::new_typed_with_env(store, &poll_env, poll_oneoff_immediate_zero);
+    imports.define("wasi_snapshot_preview1", "poll_oneoff", wrapped);
+}
+
+struct PollEnv {
+    wasi: FunctionEnv<WasiEnv>,
+    wasi_poll: Function,
+}
+
+fn poll_oneoff_immediate_zero(
+    mut ctx: FunctionEnvMut<PollEnv>,
+    subscriptions: i32,
+    events: i32,
+    count: i32,
+    written: i32,
+) -> Result<i32, RuntimeError> {
+    const SUBSCRIPTION_SIZE: u64 = 48; // wasi_snapshot_preview1 `subscription`
+    const CLOCK_TAG: u8 = 0;
+    const ABSTIME: u16 = 1;
+    let (data, mut store) = ctx.data_and_store_mut();
+    let wasi_poll = data.wasi_poll.clone();
+    if let Some(view) = data.wasi.as_ref(&store).try_memory_view(&store) {
+        for i in 0..(count.max(0) as u64) {
+            let base = subscriptions as u32 as u64 + i * SUBSCRIPTION_SIZE;
+            let (mut tag, mut timeout, mut flags) = ([0u8; 1], [0u8; 8], [0u8; 2]);
+            if view.read(base + 8, &mut tag).is_err() || tag[0] != CLOCK_TAG { continue; }
+            if view.read(base + 24, &mut timeout).is_err() || view.read(base + 40, &mut flags).is_err() { continue; }
+            let (deadline, flags) = (u64::from_le_bytes(timeout), u16::from_le_bytes(flags));
+            if flags & ABSTIME != 0 {
+                // Wasmer subtracts "now" from an absolute deadline and panics once it has
+                // passed (sleep(0) asks for exactly that). Its clock on the web is the wall
+                // clock (Date), the same one the guest read, so make the wait relative here.
+                let now = (js_sys::Date::now() * 1_000_000.0) as u64;
+                let _ = view.write(base + 24, &deadline.saturating_sub(now).max(1).to_le_bytes());
+                let _ = view.write(base + 40, &(flags & !ABSTIME).to_le_bytes());
+            } else if deadline == 0 {
+                let _ = view.write(base + 24, &1u64.to_le_bytes());
+            }
+        }
+    }
+    let result = wasi_poll.call(&mut store, &[Value::I32(subscriptions), Value::I32(events), Value::I32(count), Value::I32(written)])?;
+    Ok(result.first().and_then(Value::i32).unwrap_or(0))
 }
