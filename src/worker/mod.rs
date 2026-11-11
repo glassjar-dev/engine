@@ -170,7 +170,7 @@ fn find_rust_rlibs(fs: &mem_fs::FileSystem) -> Vec<String> {
 // ╰──────────────────────────────────────────────────────────────────────────╯
 
 // Single source of truth for these is `prefetch_urls` in lib.rs (warmed by the host).
-pub(crate) const CPP_WASM_URL: &str = "https://cdn.yousefabuhashem.com/clang/2026-11-10-slim/llvm.core.wasm";
+pub(crate) const CPP_WASM_URL: &str = "https://cdn.yousefabuhashem.com/clang/2026-11-10-fast/llvm.core.wasm";
 pub(crate) const CPP_STDLIB_URL: &str = "https://cdn.yousefabuhashem.com/clang/2026-05-22/llvm-resources.tar.gz";
 pub(crate) const RUST_WASM_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-05-31/rustc.wasm";
 pub(crate) const RUST_SYSROOT_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-05-31/rust-sysroot.tar.gz";

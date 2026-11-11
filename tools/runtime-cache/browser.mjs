@@ -396,7 +396,7 @@ try {
       await writeFile(join(runDirectory, 'libfixture.a'), fixtures.archive);
       await writeFile(join(runDirectory, 'artifact-identities.json'), JSON.stringify({
         pchSha256: digest(fixtures.pch), archiveSha256: digest(fixtures.archive), headerSha256: digest(fixtures.header),
-        compilerSha256: '2d2c6ae498b27592a3cec7a270f274a08848a834e762cc08818c78626c32053a',
+        compilerSha256: 'd6b8d6e4596136fc6ae451fe3b81b1be5a1829505cbc993179247c75a764ce87',
         sysrootSha256: '8745c6af23fd841fa507d0c73f6b6b8e8da1b4ec216a6339739a28b38ff7227b', exceptions: true
       }, null, 2) + '\n');
       await create(armOptions.retained, 'pch-on');

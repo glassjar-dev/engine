@@ -12,13 +12,13 @@ export async function buildFixtures(exceptions = false) {
   const directory = await mkdtemp(join(tmpdir(), 'debugger-sh-cpp-artifacts-'));
   try {
     const assets = [
-      ['llvm.core.wasm', '2d2c6ae498b27592a3cec7a270f274a08848a834e762cc08818c78626c32053a'],
+      ['llvm.core.wasm', 'd6b8d6e4596136fc6ae451fe3b81b1be5a1829505cbc993179247c75a764ce87'],
       ['llvm-resources.tar.gz', '8745c6af23fd841fa507d0c73f6b6b8e8da1b4ec216a6339739a28b38ff7227b']
     ];
     for (const [name, digest] of assets) {
       const base =
         name === 'llvm.core.wasm'
-          ? 'https://cdn.yousefabuhashem.com/clang/2026-11-10-slim'
+          ? 'https://cdn.yousefabuhashem.com/clang/2026-11-10-fast'
           : 'https://cdn.yousefabuhashem.com/clang/2026-05-22';
       const response = await fetch(`${base}/${name}`, {
         signal: AbortSignal.timeout(120_000)
