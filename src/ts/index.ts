@@ -8,6 +8,7 @@ import { CppCacheLimits, CppObjectCache, ObjectCacheStats } from './cpp-object-c
 import { Debugger } from './debugger.js';
 import { createEngineWorker } from './engine-worker';
 import { HostDeviceOpener, HostDeviceSession } from './host-device.js';
+import { PackageInstaller, type PackageStatus, requirementsFor } from './python-packages.js';
 import { requireToolchainManifest } from './toolchain-manifest.js';
 import { errorResult, Internals } from './util.js';
 import { VerifiedToolchain } from './verified-toolchain.js';
@@ -49,8 +50,19 @@ export interface CppPerformanceOptions {
   compilerLifetime?: 'idle' | 'project';
   toolchainProfile?: 'legacy' | 'stock-certified-v1';
 }
+export interface PythonOptions {
+  /**
+   * Install the pure-Python packages a program imports (and any requirements.txt) from
+   * PyPI before each run, like `pip install`. Off by default: it fetches from pypi.org.
+   */
+  packages?: boolean;
+  /** Progress and notes from package installs, e.g. a package with compiled code. */
+  onPackageStatus?: (status: PackageStatus) => void;
+}
+export type { PackageStatus } from './python-packages.js';
 export interface EngineOptions {
   cpp?: CppPerformanceOptions;
+  python?: PythonOptions;
   /**
    * Where to load this package's `dist/engine_bg.wasm` from, for hosts that serve it
    * themselves. Relative URLs resolve against the page. It must be the file from this
@@ -177,6 +189,9 @@ export class Engine {
   public hostDevice?: HostDeviceOpener;
 
   private readonly options?: Readonly<CppPerformanceOptions>;
+  private readonly python?: Readonly<PythonOptions>;
+  private installer?: PackageInstaller;
+  private installed?: { key: string; files: Record<string, Uint8Array> };
   private readonly retain: boolean;
   private readonly idleTimeoutMs: number;
   /** Absolute `EngineOptions.wasmUrl`, handed to each worker; unset uses the default. */
@@ -218,12 +233,18 @@ export class Engine {
   };
 
   static async create(lang: Lang, options: EngineOptions = {}): Promise<Engine> {
-    const { wasmUrl: requestedWasm, ...rest } = options;
+    const { wasmUrl: requestedWasm, python, ...rest } = options;
     const wasmUrl =
       requestedWasm === undefined
         ? undefined
         : resolveWasmUrl(requestedWasm, globalThis.location?.href);
-    const capturedOptions = structuredClone(rest);
+    const capturedOptions: EngineOptions = structuredClone(rest);
+    // Kept apart from structuredClone, which can't copy the status callback.
+    if (python)
+      capturedOptions.python = {
+        packages: !!python.packages,
+        onPackageStatus: typeof python.onPackageStatus === 'function' ? python.onPackageStatus : undefined
+      };
     const source = wasmUrl ?? null;
     if (initializedFrom !== undefined && initializedFrom !== source)
       throw new Error('The engine Wasm is already loaded from a different wasmUrl');
@@ -260,6 +281,10 @@ export class Engine {
       requireToolchainManifest(cpp.toolchainProfile);
       this.scope = Object.freeze({ ...cpp.scope });
       this.options = Object.freeze({ ...cpp, scope: this.scope, idleTimeoutMs });
+    }
+    if (options.python) {
+      if (lang !== 'python') throw new TypeError('Python options require Python');
+      this.python = Object.freeze({ ...options.python });
     }
     this.objects = new CppObjectCache(typeof cpp?.objectCache === 'object' ? cpp.objectCache : {});
     this.debugger = new Debugger();
@@ -421,7 +446,33 @@ export class Engine {
 
   /** Every Run links current objects and starts a fresh student runtime. */
   public run(): Promise<RunResult> {
+    if (this.lang === 'python' && this.python?.packages) return this.runWithPackages();
     return this.submit(false);
+  }
+
+  /** Installs what the program imports from PyPI, then runs it with those files mounted. */
+  private async runWithPackages(): Promise<RunResult> {
+    const report = (status: PackageStatus) => {
+      try {
+        this.python?.onPackageStatus?.(status);
+      } catch {
+        /* a host callback can't break the run */
+      }
+    };
+    let files: Record<string, Uint8Array> = {};
+    try {
+      const requirements = requirementsFor(this.fs);
+      const key = requirements.join('\n');
+      if (requirements.length && this.installed?.key === key) files = this.installed.files;
+      else if (requirements.length) {
+        this.installer ??= new PackageInstaller();
+        files = await this.installer.install(await this.installer.resolve(requirements, report), report);
+        this.installed = { key, files };
+      }
+    } catch (error) {
+      report({ kind: 'skipped', message: `Packages: ${error instanceof Error ? error.message : String(error)}` });
+    }
+    return this.submit(false, false, false, files);
   }
 
   /** Compiles Run-profile C++ translation units only; never links, runs, or opens devices. */
@@ -432,7 +483,8 @@ export class Engine {
   private submit(
     buildOnly: boolean,
     prepareOnly = false,
-    validateCacheInputs = false
+    validateCacheInputs = false,
+    packageFiles: Record<string, Uint8Array> = {}
   ): Promise<RunResult> {
     if (this.disposed) return Promise.resolve(errorResult(new Error('Engine is disposed')));
     if (this.active || this.cancellationDraining)
@@ -458,7 +510,7 @@ export class Engine {
       snapshot = {
         fs: omitInputs ? {} : structuredClone(this.fs),
         binary_files: Object.fromEntries(
-          Object.entries(omitInputs ? {} : this.binaryFiles).map(([path, bytes]) => [
+          Object.entries(omitInputs ? {} : { ...packageFiles, ...this.binaryFiles }).map(([path, bytes]) => [
             path,
             new Uint8Array(bytes)
           ])
