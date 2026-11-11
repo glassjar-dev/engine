@@ -47,6 +47,8 @@ async fn run(msg: WorkerStart, build_start: Instant) -> Result<WorkerOut<'static
     let fs = crate::worker::create_user_fs(FsNode::Dir(msg.fs))
         .await
         .map_err(|e| format!("Failed to prepare the filesystem: {e}"))?;
+    // Installed packages and data files, under the paths the host chose.
+    crate::worker::mount_binary_files(&fs, &msg.binary_files).await?;
 
     let exec = Execution::new(msg.stdin_buffer);
 
@@ -64,7 +66,12 @@ async fn run(msg: WorkerStart, build_start: Instant) -> Result<WorkerOut<'static
         .sysroot(STDLIB_URL)
         .fs(Box::new(fs))
         .args(if msg.is_debug { &["/_bridge.py"][..] } else { &["/main.py"][..] })
-        .envs([("PYTHONUNBUFFERED", "1"), ("PYTHONDONTWRITEBYTECODE", "1")]);
+        .envs([
+            ("PYTHONUNBUFFERED", "1"),
+            ("PYTHONDONTWRITEBYTECODE", "1"),
+            // WASI has no dup(), which pytest's default fd capture and faulthandler need.
+            ("PYTEST_ADDOPTS", "--capture=sys -p no:faulthandler"),
+        ]);
 
     if let Some(debuggee) = debuggee {
         step = step.device_file("/__debug__", Box::new(debuggee.debug_file()));

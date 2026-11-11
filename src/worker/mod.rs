@@ -29,6 +29,28 @@ use host_device::{HOST_DEVICE_PATH, HostDeviceFile};
 // │ Helpers                                                                  │
 // ╰──────────────────────────────────────────────────────────────────────────╯
 
+/// Writes binary inputs into a run's private filesystem. Paths must be absolute and free of
+/// `.`/`..` and empty segments, so nothing lands outside where the host put it.
+pub(crate) async fn mount_binary_files(
+    fs: &mem_fs::FileSystem,
+    files: &std::collections::HashMap<String, serde_bytes::ByteBuf>,
+) -> Result<(), String> {
+    for (path, bytes) in files {
+        if !path.starts_with('/') || path.split('/').skip(1).any(|part| matches!(part, "" | "." | "..")) {
+            return Err(format!("Invalid binary input path: {path}"));
+        }
+        let written = async {
+            create_dir_all(fs, Path::new(&path).parent().unwrap())?;
+            let mut file = fs.new_open_options().write(true).create_new(true).open(path)?;
+            file.write_all(bytes).await
+        }.await;
+        if let Err(error) = written {
+            return Err(format!("Cannot mount binary input {path}: {error}"));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn create_user_fs(node: FsNode) -> Result<mem_fs::FileSystem, std::io::Error> {
     let fs = mem_fs::FileSystem::default();
     create_user_fs_rec(&fs, &PathBuf::from("/"), &node).await?;
@@ -143,8 +165,12 @@ async fn start(msg: WorkerStart) {
     if msg.build_only && msg.lang != Lang::C {
         return WorkerOut::Error { message: "Compile-only preparation requires C/C++".into() }.send();
     }
-    if msg.lang != Lang::C && (msg.cpp_artifacts.is_some() || !msg.binary_files.is_empty()) {
+    if msg.lang != Lang::C && msg.cpp_artifacts.is_some() {
         return WorkerOut::Error { message: "Binary build inputs require C/C++".into() }.send();
+    }
+    // Python takes binary inputs too: installed packages and data files.
+    if msg.lang == Lang::Rust && !msg.binary_files.is_empty() {
+        return WorkerOut::Error { message: "Binary inputs require C/C++ or Python".into() }.send();
     }
     if msg.host_device.is_some() && !matches!(msg.lang, Lang::C | Lang::Python) {
         return WorkerOut::Error {
@@ -206,18 +232,8 @@ async fn start_native(mut msg: WorkerStart) {
         .await
         .expect("created user files filesystem");
 
-    for (path, bytes) in &msg.binary_files {
-        if !path.starts_with('/') || path.split('/').skip(1).any(|part| matches!(part, "" | "." | "..")) {
-            return WorkerOut::Error { message: format!("Invalid binary input path: {path}") }.send();
-        }
-        let written = async {
-            create_dir_all(&fs, Path::new(&path).parent().unwrap())?;
-            let mut file = fs.new_open_options().write(true).create_new(true).open(&path)?;
-            file.write_all(&bytes).await
-        }.await;
-        if let Err(error) = written {
-            return WorkerOut::Error { message: format!("Cannot mount binary input {path}: {error}") }.send();
-        }
+    if let Err(message) = mount_binary_files(&fs, &msg.binary_files).await {
+        return WorkerOut::Error { message }.send();
     }
 
     let exec = Execution::new(msg.stdin_buffer);
