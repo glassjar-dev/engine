@@ -1,6 +1,6 @@
 {
   "name": "glassjar",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "A browser-based execution engine and debugger powered by WebAssembly",
   "keywords": [
     "wasm",
