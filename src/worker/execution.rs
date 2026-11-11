@@ -356,7 +356,7 @@ impl<'a> Step<'a> {
                 Some(fs) => fs,
                 None => {
                     let bytes = fetch_bytes(sysroot_loc).await.ensure("Fetched sysroot from network")?;
-                    let unpacked = extract_tar_gz(bytes).await.ensure("Created sysroot fs from tarball")?;
+                    let unpacked = extract_tar(bytes).await.ensure("Created sysroot fs from tarball")?;
                     let fs: Arc<dyn FileSystem + Send + Sync> =
                         Arc::new(super::read_only_fs::ReadOnlyFs(Arc::new(unpacked)));
                     SYSROOTS.with(|s| s.borrow_mut().insert(sysroot_loc.clone(), fs.clone()));
@@ -521,8 +521,15 @@ async fn sleep_ms(ms: i32) {
     let _ = JsFuture::from(promise).await;
 }
 
-pub async fn extract_tar_gz(data: Vec<u8>) -> Result<mem_fs::FileSystem, std::io::Error> {
-    let decoder = GzDecoder::new(Cursor::new(data));
+/// Unpacks a tar archive compressed with zstd or gzip, told apart by zstd's magic number.
+pub async fn extract_tar(data: Vec<u8>) -> Result<mem_fs::FileSystem, std::io::Error> {
+    let zstd = data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
+    let data = Cursor::new(data);
+    let decoder: Box<dyn Read> = if zstd {
+        Box::new(ruzstd::decoding::StreamingDecoder::new(data).map_err(std::io::Error::other)?)
+    } else {
+        Box::new(GzDecoder::new(data))
+    };
     let mut archive = Archive::new(decoder);
 
     let fs = mem_fs::FileSystem::default();

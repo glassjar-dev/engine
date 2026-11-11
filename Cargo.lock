@@ -726,6 +726,7 @@ dependencies = [
  "instant",
  "js-sys",
  "regex",
+ "ruzstd 0.8.3",
  "serde",
  "serde-wasm-bindgen",
  "serde_bytes",
@@ -1652,7 +1653,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "indexmap",
  "memchr",
- "ruzstd",
+ "ruzstd 0.5.0",
 ]
 
 [[package]]
@@ -2088,6 +2089,15 @@ dependencies = [
  "byteorder",
  "derive_more 0.99.20",
  "twox-hash 1.6.3",
+]
+
+[[package]]
+name = "ruzstd"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
+dependencies = [
+ "twox-hash 2.1.2",
 ]
 
 [[package]]

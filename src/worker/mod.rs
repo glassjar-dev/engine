@@ -22,7 +22,7 @@ mod last_build;
 mod read_only_fs;
 mod runtime;
 
-use execution::{Execution, extract_tar_gz};
+use execution::{Execution, extract_tar};
 use host_device::{HOST_DEVICE_PATH, HostDeviceFile};
 
 // ╭──────────────────────────────────────────────────────────────────────────╮
@@ -523,8 +523,8 @@ async fn cpp_sysroot(toolchain: &execution::CompilerToolchain) -> (SharedFs, Sha
     let identity = &toolchain.identities.1;
     let cached = CPP_SYSROOT.with(|slot| slot.borrow().as_ref().filter(|(id, ..)| id == identity).map(|(_, s, e)| (s.clone(), e.clone())));
     if let Some(cached) = cached { return cached; }
-    let sysroot = extract_tar_gz(toolchain.sysroot.clone()).await.expect("C++ sysroot filesystem");
-    let exceptions = extract_tar_gz(include_bytes!("../../assets/cpp-exceptions/runtime.tar.gz").to_vec()).await.expect("embedded C++ exception runtime");
+    let sysroot = extract_tar(toolchain.sysroot.clone()).await.expect("C++ sysroot filesystem");
+    let exceptions = extract_tar(include_bytes!("../../assets/cpp-exceptions/runtime.tar.gz").to_vec()).await.expect("embedded C++ exception runtime");
     let sysroot: SharedFs = Arc::new(read_only_fs::ReadOnlyFs(Arc::new(sysroot)));
     let exceptions: SharedFs = Arc::new(read_only_fs::ReadOnlyFs(Arc::new(exceptions)));
     CPP_SYSROOT.with(|slot| *slot.borrow_mut() = Some((identity.clone(), sysroot.clone(), exceptions.clone())));
