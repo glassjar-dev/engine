@@ -21,6 +21,10 @@ pub fn prefetch_urls(lang: &str) -> Vec<String> {
             worker::CPP_WASM_URL.to_string(),
             worker::CPP_STDLIB_URL.to_string(),
         ],
+        "rust" => vec![
+            worker::RUST_WASM_URL.to_string(),
+            worker::RUST_SYSROOT_URL.to_string(),
+        ],
         _ => Vec::new(),
     }
 }

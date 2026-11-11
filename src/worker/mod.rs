@@ -103,68 +103,6 @@ fn collect_dir_sources(
     }
 }
 
-fn rust_obj_path(source: &str) -> String {
-    format!("{}.o", source.trim_end_matches(".rs"))
-}
-
-fn collect_rust_objs(fs: &mem_fs::FileSystem, source: &str) -> Vec<String> {
-    let obj_path = rust_obj_path(source);
-    let mut objs = vec![obj_path.clone()];
-
-    let path = Path::new(source);
-    let dir = path.parent().unwrap_or(Path::new("/"));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
-    let Ok(mut entries) = fs.read_dir(dir) else {
-        return objs;
-    };
-    for entry in entries.by_ref().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(stem) && name.ends_with(".rcgu.o") {
-            objs.push(format!("{}/{}", dir.to_string_lossy(), name));
-        }
-    }
-    objs
-}
-
-fn find_rust_rlibs(fs: &mem_fs::FileSystem) -> Vec<String> {
-    let dir = Path::new("/lib/rustlib/wasm32-wasip1/lib");
-    let mut entries = fs.read_dir(dir).expect("Rust sysroot rlib directory");
-    let names: Vec<String> = entries
-        .by_ref()
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-
-    [
-        "libpanic_abort-",
-        "libstd-",
-        "libwasi-",
-        "libcfg_if-",
-        "librustc_demangle-",
-        "libstd_detect-",
-        "libhashbrown-",
-        "librustc_std_workspace_alloc-",
-        "libminiz_oxide-",
-        "libadler2-",
-        "libunwind-",
-        "liblibc-",
-        "librustc_std_workspace_core-",
-        "liballoc-",
-        "libcore-",
-        "libcompiler_builtins-",
-    ]
-    .iter()
-    .map(|prefix| {
-        names
-            .iter()
-            .find(|name| name.starts_with(prefix) && name.ends_with(".rlib"))
-            .map(|name| format!("/lib/rustlib/wasm32-wasip1/lib/{name}"))
-            .unwrap_or_else(|| panic!("missing rlib for prefix {prefix}"))
-    })
-    .collect()
-}
-
 // ╭──────────────────────────────────────────────────────────────────────────╮
 // │ Worker                                                                   │
 // ╰──────────────────────────────────────────────────────────────────────────╯
@@ -172,8 +110,8 @@ fn find_rust_rlibs(fs: &mem_fs::FileSystem) -> Vec<String> {
 // Single source of truth for these is `prefetch_urls` in lib.rs (warmed by the host).
 pub(crate) const CPP_WASM_URL: &str = "https://cdn.yousefabuhashem.com/clang/2026-11-10-fast/llvm.core.wasm";
 pub(crate) const CPP_STDLIB_URL: &str = "https://cdn.yousefabuhashem.com/clang/2026-05-22/llvm-resources.tar.gz";
-pub(crate) const RUST_WASM_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-05-31/rustc.wasm";
-pub(crate) const RUST_SYSROOT_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-05-31/rust-sysroot.tar.gz";
+pub(crate) const RUST_WASM_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-11-11/rustc.wasm";
+pub(crate) const RUST_SYSROOT_URL: &str = "https://cdn.yousefabuhashem.com/rust/2026-11-11/rust-sysroot.tar.zst";
 
 /// Builds a `Stop` with build/run timing. `run_start` is `None` when execution never
 /// began (e.g. a compile error), in which case the elapsed time is all build.
@@ -847,74 +785,34 @@ async fn start_rust(
     exec: Execution,
     fs: mem_fs::FileSystem,
 ) {
-    let mut union_fs: Option<Box<dyn FileSystem>> = Some(Box::new(fs));
-
-    for source in &sources {
-        let obj_path = rust_obj_path(source);
-        let mut rustc_args = vec![
-            source.as_str(),
-            // Without this rustc defaults to the 2015 edition; `cargo new` uses 2024.
-            "--edition=2024",
-            "--sysroot",
-            "/",
-            "--target",
-            "wasm32-wasip1",
-            "-Cpanic=abort",
-            "-Ccodegen-units=1",
-            "-Zthreads=1",
-            "--emit=obj",
-            "-o",
-            obj_path.as_str(),
-        ];
-
-        if is_debug {
-            rustc_args.extend(["-g", "-Copt-level=0"]);
-        }
-
-        let mut step = exec
-            .step("rustc")
-            .binary(RUST_WASM_URL)
-            .args(&rustc_args);
-        if let Some(fs) = union_fs.take() {
-            step = step
-                .sysroot(RUST_SYSROOT_URL)
-                .fs(fs);
-        }
-        let exit = step.run().await.expect("Compilation succeeded");
-
-        if !exit.is_success() {
-            return stop(exit.raw(), build_start, None).send();
-        }
-    }
-
-    let mut link_args: Vec<String> = vec![
-        "--export=__main_void".into(),
-        "-z".into(),
-        "stack-size=1048576".into(),
-        "--stack-first".into(),
-        "--no-demangle".into(),
-        "/lib/rustlib/wasm32-wasip1/lib/self-contained/crt1-command.o".into(),
+    // rustc compiles the crate root and links it with the wasm-ld it carries.
+    let mut args = vec![
+        sources[0].as_str(),
+        // Without this rustc defaults to the 2015 edition; `cargo new` uses 2024.
+        "--edition=2024",
+        "--sysroot",
+        "/",
+        "--target",
+        "wasm32-wasip1",
+        "-Ccodegen-units=1",
+        "-Clink-self-contained=yes",
+        "-Clink-arg=--export=__main_void",
+        "-o",
+        "/main.wasm",
     ];
-    for source in &sources {
-        link_args.extend(collect_rust_objs(&exec.fs, source));
+    if is_debug {
+        args.push("-g");
     }
-    link_args.extend(find_rust_rlibs(&exec.fs));
-    link_args.extend([
-        "-L/lib/rustlib/wasm32-wasip1/lib/self-contained".into(),
-        "-lc".into(),
-        "-o".into(),
-        "/main.wasm".into(),
-        "--gc-sections".into(),
-        "-O0".into(),
-    ]);
 
     let exit = exec
-        .step("wasm-ld")
-        .binary(CPP_WASM_URL)
-        .args(link_args.iter().map(String::as_str))
+        .step("rustc")
+        .binary(RUST_WASM_URL)
+        .sysroot(RUST_SYSROOT_URL)
+        .fs(Box::new(fs))
+        .args(&args)
         .run()
         .await
-        .expect("Linking succeeded");
+        .expect("Compilation succeeded");
 
     if !exit.is_success() {
         return stop(exit.raw(), build_start, None).send();
