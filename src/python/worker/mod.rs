@@ -69,8 +69,9 @@ async fn run(msg: WorkerStart, build_start: Instant) -> Result<WorkerOut<'static
         .envs([
             ("PYTHONUNBUFFERED", "1"),
             ("PYTHONDONTWRITEBYTECODE", "1"),
-            // WASI has no dup(), which pytest's default fd capture and faulthandler need.
-            ("PYTEST_ADDOPTS", "--capture=sys -p no:faulthandler"),
+            // WASI has no dup() (pytest's fd capture, faulthandler) or umask() (its cache,
+            // which a fresh filesystem per run would lose anyway).
+            ("PYTEST_ADDOPTS", "--capture=sys -p no:faulthandler -p no:cacheprovider"),
         ]);
 
     if let Some(debuggee) = debuggee {
