@@ -8,7 +8,7 @@ import { CppCacheLimits, CppObjectCache, ObjectCacheStats } from './cpp-object-c
 import { Debugger } from './debugger.js';
 import { createEngineWorker } from './engine-worker';
 import { HostDeviceOpener, HostDeviceSession } from './host-device.js';
-import { PackageInstaller, type PackageStatus, requirementsFor } from './python-packages.js';
+import { type PackageStatus, pythonPackageFiles } from './python-packages.js';
 import { requireToolchainManifest } from './toolchain-manifest.js';
 import { errorResult, Internals } from './util.js';
 import { VerifiedToolchain } from './verified-toolchain.js';
@@ -60,6 +60,8 @@ export interface PythonOptions {
   onPackageStatus?: (status: PackageStatus) => void;
 }
 export type { PackageStatus } from './python-packages.js';
+/** Installs (or reuses) a workspace's PyPI packages, e.g. for an editor's type checker. */
+export { pythonPackageFiles, SITE_PACKAGES } from './python-packages.js';
 export interface EngineOptions {
   cpp?: CppPerformanceOptions;
   python?: PythonOptions;
@@ -190,8 +192,6 @@ export class Engine {
 
   private readonly options?: Readonly<CppPerformanceOptions>;
   private readonly python?: Readonly<PythonOptions>;
-  private installer?: PackageInstaller;
-  private installed?: { key: string; files: Record<string, Uint8Array> };
   private readonly retain: boolean;
   private readonly idleTimeoutMs: number;
   /** Absolute `EngineOptions.wasmUrl`, handed to each worker; unset uses the default. */
@@ -243,7 +243,8 @@ export class Engine {
     if (python)
       capturedOptions.python = {
         packages: !!python.packages,
-        onPackageStatus: typeof python.onPackageStatus === 'function' ? python.onPackageStatus : undefined
+        onPackageStatus:
+          typeof python.onPackageStatus === 'function' ? python.onPackageStatus : undefined
       };
     const source = wasmUrl ?? null;
     if (initializedFrom !== undefined && initializedFrom !== source)
@@ -461,16 +462,12 @@ export class Engine {
     };
     let files: Record<string, Uint8Array> = {};
     try {
-      const requirements = requirementsFor(this.fs);
-      const key = requirements.join('\n');
-      if (requirements.length && this.installed?.key === key) files = this.installed.files;
-      else if (requirements.length) {
-        this.installer ??= new PackageInstaller();
-        files = await this.installer.install(await this.installer.resolve(requirements, report), report);
-        this.installed = { key, files };
-      }
+      files = await pythonPackageFiles(this.fs, report);
     } catch (error) {
-      report({ kind: 'skipped', message: `Packages: ${error instanceof Error ? error.message : String(error)}` });
+      report({
+        kind: 'skipped',
+        message: `Packages: ${error instanceof Error ? error.message : String(error)}`
+      });
     }
     return this.submit(false, false, false, files);
   }
@@ -510,10 +507,9 @@ export class Engine {
       snapshot = {
         fs: omitInputs ? {} : structuredClone(this.fs),
         binary_files: Object.fromEntries(
-          Object.entries(omitInputs ? {} : { ...packageFiles, ...this.binaryFiles }).map(([path, bytes]) => [
-            path,
-            new Uint8Array(bytes)
-          ])
+          Object.entries(omitInputs ? {} : { ...packageFiles, ...this.binaryFiles }).map(
+            ([path, bytes]) => [path, new Uint8Array(bytes)]
+          )
         ),
         cpp_artifacts: structuredClone(artifacts)
       };

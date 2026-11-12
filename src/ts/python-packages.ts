@@ -15,7 +15,12 @@ export const SITE_PACKAGES = '/usr/local/lib/python3.15/site-packages';
 
 const PYPI_JSON = 'https://pypi.org/pypi';
 const WHEEL_HOST = 'files.pythonhosted.org';
-const LIMITS = { packages: 50, downloadBytes: 60 * 1024 * 1024, files: 5000, unpackedBytes: 200 * 1024 * 1024 };
+const LIMITS = {
+  packages: 50,
+  downloadBytes: 60 * 1024 * 1024,
+  files: 5000,
+  unpackedBytes: 200 * 1024 * 1024
+};
 
 /** Environment markers for this runtime (PEP 508). */
 const ENVIRONMENT: Record<string, string> = {
@@ -110,7 +115,12 @@ export function requirementsFor(fs: DirNode): string[] {
   const wanted = new Map<string, string>();
   for (const source of sources)
     for (const name of importsIn(source)) {
-      if (STDLIB.has(name) || local.has(name) || name.startsWith('_') && !(name in PROJECT_FOR_IMPORT)) continue;
+      if (
+        STDLIB.has(name) ||
+        local.has(name) ||
+        (name.startsWith('_') && !(name in PROJECT_FOR_IMPORT))
+      )
+        continue;
       const project = PROJECT_FOR_IMPORT[name] ?? name;
       wanted.set(normalize(project), project);
     }
@@ -125,7 +135,13 @@ export function requirementsFor(fs: DirNode): string[] {
 
 // ── PEP 440 versions and specifiers (the common subset) ──────────────────────
 
-type Version = { release: number[]; pre?: [number, number]; post?: number; dev?: number; text: string };
+type Version = {
+  release: number[];
+  pre?: [number, number];
+  post?: number;
+  dev?: number;
+  text: string;
+};
 
 export function parseVersion(text: string): Version | null {
   const match =
@@ -134,11 +150,20 @@ export function parseVersion(text: string): Version | null {
     );
   if (!match) return null;
   const preKind = match[2]?.toLowerCase();
-  const preRank = preKind ? ({ a: 0, alpha: 0, b: 1, beta: 1, c: 2, rc: 2, pre: 2, preview: 2 } as Record<string, number>)[preKind] : undefined;
+  const preRank = preKind
+    ? (
+        { a: 0, alpha: 0, b: 1, beta: 1, c: 2, rc: 2, pre: 2, preview: 2 } as Record<string, number>
+      )[preKind]
+    : undefined;
   return {
     release: match[1].split('.').map(Number),
     pre: preRank === undefined ? undefined : [preRank, Number(match[3] || 0)],
-    post: match[4] !== undefined ? Number(match[4]) : match[5] !== undefined ? Number(match[5] || 0) : undefined,
+    post:
+      match[4] !== undefined
+        ? Number(match[4])
+        : match[5] !== undefined
+          ? Number(match[5] || 0)
+          : undefined,
     dev: match[6] !== undefined ? Number(match[6] || 0) : undefined,
     text
   };
@@ -158,7 +183,8 @@ export function compareVersions(a: Version, b: Version): number {
     v.post ?? -1,
     v.dev ?? Number.POSITIVE_INFINITY
   ];
-  const ka = key(a), kb = key(b);
+  const ka = key(a),
+    kb = key(b);
   for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return Math.sign(ka[i] - kb[i]);
   return 0;
 }
@@ -186,12 +212,17 @@ export function satisfies(version: Version, specifiers: string): boolean {
       const upper = other.release.slice(0, Math.max(1, other.release.length - 1));
       if (c < 0 || !upper.every((n, i) => (version.release[i] ?? 0) === n)) return false;
     } else if (
-      !(op === '==' || op === '===' ? c === 0
-        : op === '!=' ? c !== 0
-        : op === '<=' ? c <= 0
-        : op === '>=' ? c >= 0
-        : op === '<' ? c < 0
-        : c > 0)
+      !(op === '==' || op === '==='
+        ? c === 0
+        : op === '!='
+          ? c !== 0
+          : op === '<='
+            ? c <= 0
+            : op === '>='
+              ? c >= 0
+              : op === '<'
+                ? c < 0
+                : c > 0)
     )
       return false;
   }
@@ -204,11 +235,16 @@ export type Requirement = { name: string; extras: string[]; specifiers: string; 
 
 export function parseRequirement(text: string): Requirement | null {
   const [spec, marker] = text.split(';', 2).map((s) => s.trim());
-  const match = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*\(?\s*([^)]*?)\s*\)?$/.exec(spec);
+  const match = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?\s*\(?\s*([^)]*?)\s*\)?$/.exec(
+    spec
+  );
   if (!match || match[3].includes('@')) return null; // direct URL references aren't followed
   return {
     name: match[1],
-    extras: (match[2] ?? '').split(',').map((e) => e.trim()).filter(Boolean),
+    extras: (match[2] ?? '')
+      .split(',')
+      .map((e) => e.trim())
+      .filter(Boolean),
     specifiers: match[3].replace(/\s+/g, ''),
     marker: marker || undefined
   };
@@ -216,14 +252,21 @@ export function parseRequirement(text: string): Requirement | null {
 
 /** Evaluates a PEP 508 marker for this runtime, with the given extras requested. */
 export function markerMatches(marker: string, extras: string[] = []): boolean {
-  const tokens = marker.match(/\(|\)|'[^']*'|"[^"]*"|===|==|!=|<=|>=|~=|<|>|\bnot\s+in\b|\bin\b|\band\b|\bor\b|[A-Za-z_][A-Za-z0-9_.]*/g) ?? [];
+  const tokens =
+    marker.match(
+      /\(|\)|'[^']*'|"[^"]*"|===|==|!=|<=|>=|~=|<|>|\bnot\s+in\b|\bin\b|\band\b|\bor\b|[A-Za-z_][A-Za-z0-9_.]*/g
+    ) ?? [];
   let i = 0;
   const value = (token: string): { text: string; variable?: string } => {
     if (/^['"]/.test(token)) return { text: token.slice(1, -1) };
     if (token === 'extra') return { text: '', variable: 'extra' };
     return { text: ENVIRONMENT[token] ?? '', variable: token };
   };
-  const compare = (left: { text: string; variable?: string }, op: string, right: { text: string; variable?: string }): boolean => {
+  const compare = (
+    left: { text: string; variable?: string },
+    op: string,
+    right: { text: string; variable?: string }
+  ): boolean => {
     if (left.variable === 'extra' || right.variable === 'extra') {
       const wanted = normalize((left.variable === 'extra' ? right : left).text);
       const has = extras.some((e) => normalize(e) === wanted);
@@ -236,9 +279,14 @@ export function markerMatches(marker: string, extras: string[] = []): boolean {
       const flipped: Record<string, string> = { '<': '>', '>': '<', '<=': '>=', '>=': '<=' };
       return compare(right, flipped[op] ?? op, left);
     }
-    const a = parseVersion(left.text), b = parseVersion(right.text);
+    const a = parseVersion(left.text),
+      b = parseVersion(right.text);
     if (a && b && /version/.test(left.variable ?? '')) return satisfies(a, `${op}${right.text}`);
-    return op === '==' || op === '===' ? left.text === right.text : op === '!=' ? left.text !== right.text : false;
+    return op === '==' || op === '==='
+      ? left.text === right.text
+      : op === '!='
+        ? left.text !== right.text
+        : false;
   };
   const atom = (): boolean => {
     if (tokens[i] === '(') {
@@ -254,12 +302,18 @@ export function markerMatches(marker: string, extras: string[] = []): boolean {
   };
   const and = (): boolean => {
     let result = atom();
-    while (tokens[i] === 'and') { i++; result = atom() && result; }
+    while (tokens[i] === 'and') {
+      i++;
+      result = atom() && result;
+    }
     return result;
   };
   const or = (): boolean => {
     let result = and();
-    while (tokens[i] === 'or') { i++; result = and() || result; }
+    while (tokens[i] === 'or') {
+      i++;
+      result = and() || result;
+    }
     return result;
   };
   try {
@@ -271,16 +325,41 @@ export function markerMatches(marker: string, extras: string[] = []): boolean {
 
 // ── PyPI ─────────────────────────────────────────────────────────────────────
 
-type PypiFile = { filename: string; url: string; packagetype: string; requires_python?: string | null; digests: { sha256: string }; size: number; yanked?: boolean };
-type PypiProject = { info: { name: string; version: string; requires_dist?: string[] | null }; releases: Record<string, PypiFile[]> };
+type PypiFile = {
+  filename: string;
+  url: string;
+  packagetype: string;
+  requires_python?: string | null;
+  digests: { sha256: string };
+  size: number;
+  yanked?: boolean;
+};
+type PypiProject = {
+  info: { name: string; version: string; requires_dist?: string[] | null };
+  releases: Record<string, PypiFile[]>;
+};
 
-export type ResolvedPackage = { name: string; version: string; url: string; sha256: string; size: number };
+export type ResolvedPackage = {
+  name: string;
+  version: string;
+  url: string;
+  sha256: string;
+  size: number;
+};
 
 /** A pure-Python wheel (no compiled code), usable on any platform. */
 function pureWheel(file: PypiFile): boolean {
   if (file.packagetype !== 'bdist_wheel' || file.yanked) return false;
-  const tags = file.filename.replace(/\.whl$/, '').split('-').slice(-3);
-  return tags.length === 3 && tags[1] === 'none' && tags[2] === 'any' && tags[0].split('.').some((t) => t === 'py3' || t.startsWith('py3'));
+  const tags = file.filename
+    .replace(/\.whl$/, '')
+    .split('-')
+    .slice(-3);
+  return (
+    tags.length === 3 &&
+    tags[1] === 'none' &&
+    tags[2] === 'any' &&
+    tags[0].split('.').some((t) => t === 'py3' || t.startsWith('py3'))
+  );
 }
 
 function pythonOk(requiresPython?: string | null): boolean {
@@ -314,8 +393,11 @@ export class PackageInstaller {
     const key = `${normalize(name)}@${version}`;
     let cached = this.metadata.get(key);
     if (!cached) {
-      cached = this.fetchImpl(`${PYPI_JSON}/${encodeURIComponent(normalize(name))}/${encodeURIComponent(version)}/json`).then(
-        async (response) => (response.ok ? (((await response.json()) as PypiProject).info.requires_dist ?? []) : []),
+      cached = this.fetchImpl(
+        `${PYPI_JSON}/${encodeURIComponent(normalize(name))}/${encodeURIComponent(version)}/json`
+      ).then(
+        async (response) =>
+          response.ok ? (((await response.json()) as PypiProject).info.requires_dist ?? []) : [],
         () => []
       );
       this.metadata.set(key, cached);
@@ -327,7 +409,10 @@ export class PackageInstaller {
    * Resolves requirements and their dependencies to pure-Python wheels. Greedy: the newest
    * release that fits every constraint seen so far for that project.
    */
-  async resolve(requirements: string[], report: (status: PackageStatus) => void = () => {}): Promise<ResolvedPackage[]> {
+  async resolve(
+    requirements: string[],
+    report: (status: PackageStatus) => void = () => {}
+  ): Promise<ResolvedPackage[]> {
     const chosen = new Map<string, ResolvedPackage>();
     const queue: Array<{ requirement: Requirement; top: boolean }> = [];
     for (const text of requirements) {
@@ -346,14 +431,22 @@ export class PackageInstaller {
       }
       const candidates = Object.entries(project.releases)
         .map(([text, files]) => ({ version: parseVersion(text), files }))
-        .filter((c): c is { version: Version; files: PypiFile[] } => c.version !== null && satisfies(c.version, requirement.specifiers))
+        .filter(
+          (c): c is { version: Version; files: PypiFile[] } =>
+            c.version !== null && satisfies(c.version, requirement.specifiers)
+        )
         .sort((a, b) => compareVersions(b.version, a.version));
       const stable = candidates.filter((c) => !isPre(c.version));
       const pick = [...stable, ...candidates.filter((c) => isPre(c.version))]
-        .map((c) => ({ version: c.version, wheel: c.files.find((f) => pureWheel(f) && pythonOk(f.requires_python)) }))
+        .map((c) => ({
+          version: c.version,
+          wheel: c.files.find((f) => pureWheel(f) && pythonOk(f.requires_python))
+        }))
         .find((c) => c.wheel);
       if (!pick?.wheel) {
-        const compiled = candidates.some((c) => c.files.some((f) => f.packagetype === 'bdist_wheel'));
+        const compiled = candidates.some((c) =>
+          c.files.some((f) => f.packagetype === 'bdist_wheel')
+        );
         report({
           kind: 'skipped',
           message: compiled
@@ -364,8 +457,18 @@ export class PackageInstaller {
       }
       const url = new URL(pick.wheel.url);
       if (url.protocol !== 'https:' || url.hostname !== WHEEL_HOST) continue;
-      chosen.set(key, { name: project.info.name, version: pick.version.text, url: pick.wheel.url, sha256: pick.wheel.digests.sha256, size: pick.wheel.size });
-      for (const dependency of await this.requiresDist(requirement.name, pick.version.text, project)) {
+      chosen.set(key, {
+        name: project.info.name,
+        version: pick.version.text,
+        url: pick.wheel.url,
+        sha256: pick.wheel.digests.sha256,
+        size: pick.wheel.size
+      });
+      for (const dependency of await this.requiresDist(
+        requirement.name,
+        pick.version.text,
+        project
+      )) {
         const parsed = parseRequirement(dependency);
         if (!parsed || !NAME.test(parsed.name)) continue;
         if (parsed.marker && !markerMatches(parsed.marker, requirement.extras)) continue;
@@ -376,13 +479,20 @@ export class PackageInstaller {
   }
 
   /** Files to mount, by absolute path in the run, for these resolved packages. */
-  async install(packages: ResolvedPackage[], report: (status: PackageStatus) => void = () => {}): Promise<Record<string, Uint8Array>> {
+  async install(
+    packages: ResolvedPackage[],
+    report: (status: PackageStatus) => void = () => {}
+  ): Promise<Record<string, Uint8Array>> {
     const files: Record<string, Uint8Array> = {};
-    let downloaded = 0, count = 0;
+    let downloaded = 0,
+      count = 0;
     for (const pkg of packages) {
       downloaded += pkg.size;
       if (downloaded > LIMITS.downloadBytes) {
-        report({ kind: 'skipped', message: `${pkg.name}: over the ${LIMITS.downloadBytes >> 20}MB package limit` });
+        report({
+          kind: 'skipped',
+          message: `${pkg.name}: over the ${LIMITS.downloadBytes >> 20}MB package limit`
+        });
         break;
       }
       const key = `${pkg.url}#${pkg.sha256}`;
@@ -397,7 +507,10 @@ export class PackageInstaller {
       try {
         contents = await wheel;
       } catch (error) {
-        report({ kind: 'skipped', message: `${pkg.name}: ${error instanceof Error ? error.message : String(error)}` });
+        report({
+          kind: 'skipped',
+          message: `${pkg.name}: ${error instanceof Error ? error.message : String(error)}`
+        });
         continue;
       }
       for (const [path, bytes] of contents) {
@@ -412,8 +525,10 @@ export class PackageInstaller {
     const response = await this.fetchImpl(pkg.url, { cache: 'force-cache' });
     if (!response.ok) throw new Error(`download failed (${response.status})`);
     const bytes = new Uint8Array(await response.arrayBuffer());
-    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((b) => b.toString(16).padStart(2, '0')).join('');
-    if (digest !== pkg.sha256) throw new Error('download did not match PyPI\'s checksum');
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    if (digest !== pkg.sha256) throw new Error("download did not match PyPI's checksum");
     return wheelFiles(await unzip(bytes, LIMITS.unpackedBytes));
   }
 }
@@ -442,11 +557,17 @@ function safePath(path: string): boolean {
 }
 
 /** Files in a zip archive (stored or deflated), with traversal and size guards. */
-export async function unzip(bytes: Uint8Array, maxUnpacked: number): Promise<Map<string, Uint8Array>> {
+export async function unzip(
+  bytes: Uint8Array,
+  maxUnpacked: number
+): Promise<Map<string, Uint8Array>> {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let end = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65535); i--)
-    if (view.getUint32(i, true) === 0x06054b50) { end = i; break; }
+    if (view.getUint32(i, true) === 0x06054b50) {
+      end = i;
+      break;
+    }
   if (end < 0) throw new Error('not a zip archive');
   const entries = view.getUint16(end + 10, true);
   let offset = view.getUint32(end + 16, true);
@@ -468,14 +589,60 @@ export async function unzip(bytes: Uint8Array, maxUnpacked: number): Promise<Map
     if (!safePath(name)) throw new Error(`unsafe path in package: ${name}`);
     total += size;
     if (total > maxUnpacked) throw new Error('package too large');
-    const dataStart = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    const dataStart =
+      local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
     const data = bytes.subarray(dataStart, dataStart + compressed);
     let out: Uint8Array;
     if (method === 0) out = data.slice();
-    else if (method === 8) out = new Uint8Array(await new Response(new Blob([data.slice()]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+    else if (method === 8)
+      out = new Uint8Array(
+        await new Response(
+          new Blob([data.slice()]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
+        ).arrayBuffer()
+      );
     else throw new Error(`unsupported compression in package: ${name}`);
     if (out.length !== size) throw new Error(`corrupt entry in package: ${name}`);
     files.set(name, out);
   }
+  return files;
+}
+
+// ── shared installs ──────────────────────────────────────────────────────────
+
+const shared = {
+  installer: undefined as PackageInstaller | undefined,
+  sets: new Map<string, Promise<{ files: Record<string, Uint8Array>; notes: PackageStatus[] }>>()
+};
+
+/**
+ * The files a workspace's PyPI packages add under site-packages, installing them if needed.
+ * One installer serves the whole page, so a Run and IntelliSense asking for the same
+ * packages share lookups and downloads. Notes about packages that can't be installed are
+ * repeated to every caller; install progress is reported only while downloading.
+ */
+export async function pythonPackageFiles(
+  fs: DirNode,
+  report: (status: PackageStatus) => void = () => {}
+): Promise<Record<string, Uint8Array>> {
+  const requirements = requirementsFor(fs);
+  if (!requirements.length) return {};
+  const key = requirements.join('\n');
+  let set = shared.sets.get(key);
+  if (!set) {
+    shared.installer ??= new PackageInstaller();
+    const installer = shared.installer;
+    const notes: PackageStatus[] = [];
+    const collect = (status: PackageStatus) => {
+      if (status.kind === 'skipped') notes.push(status);
+      else report(status);
+    };
+    set = installer
+      .resolve(requirements, collect)
+      .then(async (resolved) => ({ files: await installer.install(resolved, collect), notes }));
+    shared.sets.set(key, set);
+    set.catch(() => shared.sets.delete(key));
+  }
+  const { files, notes } = await set;
+  for (const note of notes) report(note);
   return files;
 }
