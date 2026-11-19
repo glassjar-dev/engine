@@ -42,6 +42,15 @@ test('reads one-line import statements without the code after them', () => {
   assert.deepEqual(P.requirementsFor(fs), ['numpy']);
 });
 
+test("a module in any folder is the workspace's own", () => {
+  const fs = {
+    'main.py': '',
+    mt: { 'calc.py': '', 'test_calc.py': 'import calc\nimport helpers\nimport attrs' },
+    lib: { helpers: { '__init__.py': '' } }
+  };
+  assert.deepEqual(P.requirementsFor(fs), ['attrs']);
+});
+
 test('orders and matches versions like PEP 440', () => {
   const v = (s: string) => P.parseVersion(s);
   const order = ['1.0.dev1', '1.0a1', '1.0b2', '1.0rc1', '1.0', '1.0.post1', '1.1'];

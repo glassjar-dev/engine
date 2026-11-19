@@ -103,13 +103,15 @@ export function requirementsFor(fs: DirNode): string[] {
   const walk = (node: DirNode, path: string) => {
     for (const [name, child] of Object.entries(node)) {
       if (typeof child === 'string') {
+        // Programs can start in any folder (a shell's `cd`), so a module anywhere in the
+        // workspace may be an import of the student's own.
         if (name.endsWith('.py')) {
           sources.push(child);
-          if (!path) local.add(name.slice(0, -3));
+          local.add(name.slice(0, -3));
         }
         if (!path && name === 'requirements.txt') requirementsTxt = child;
       } else {
-        if (!path) local.add(name);
+        local.add(name);
         walk(child, `${path}/${name}`);
       }
     }
