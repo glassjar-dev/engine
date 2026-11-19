@@ -982,3 +982,22 @@ test('stdin.end closes input only after earlier writes land', async () => {
   await job;
   await engine.dispose();
 });
+
+test('input written while Python packages install reaches the run', async () => {
+  const engine = await Engine.create('python', { python: { packages: true } });
+  engine.debugger.enabled = false;
+  engine.fs = { 'main.py': 'print(input())' };
+  const job = engine.run();
+  void engine.stdin.write('abc');
+  void engine.stdin.end();
+  const before = workers.length;
+  while (workers.length === before) await new Promise((resolve) => setTimeout(resolve, 1));
+  const worker = workers.at(-1);
+  await ready(worker);
+  const indices = new Int32Array(worker.messages.at(-1).stdin_buffer, 0, 3);
+  assert.equal(indices[1], 3);
+  assert.equal(indices[2], 1);
+  worker.emit({ type: 'stop', exit_code: 0, build_ms: 1, run_ms: 1 });
+  await job;
+  await engine.dispose();
+});

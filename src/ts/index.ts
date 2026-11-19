@@ -476,7 +476,12 @@ export class Engine {
 
   /** Every Run links current objects and starts a fresh student runtime. */
   public run(): Promise<RunResult> {
-    if (this.lang === 'python' && this.python?.packages) return this.runWithPackages();
+    if (this.lang === 'python' && this.python?.packages) {
+      // Input written while packages install belongs to this run, so reset it now, not
+      // when the job starts.
+      if (!this.active && !this.cancellationDraining) this.stdin[Internals].clear();
+      return this.runWithPackages();
+    }
     return this.submit(false);
   }
 
@@ -498,7 +503,7 @@ export class Engine {
         message: `Packages: ${error instanceof Error ? error.message : String(error)}`
       });
     }
-    return this.submit(false, false, false, files);
+    return this.submit(false, false, false, files, true);
   }
 
   /**
@@ -513,7 +518,8 @@ export class Engine {
     buildOnly: boolean,
     prepareOnly = false,
     validateCacheInputs = false,
-    packageFiles: Record<string, Uint8Array> = {}
+    packageFiles: Record<string, Uint8Array> = {},
+    keepStdin = false
   ): Promise<RunResult> {
     if (this.disposed) return Promise.resolve(errorResult(new Error('Engine is disposed')));
     if (this.active || this.cancellationDraining)
@@ -558,7 +564,7 @@ export class Engine {
     )
       return Promise.resolve(errorResult(new TypeError('Invalid host device configuration')));
     clearTimeout(this.idleTimer);
-    this.stdin[Internals].clear();
+    if (!keepStdin) this.stdin[Internals].clear();
     const reused = !!this.slot;
     let resolve!: (value: RunResult) => void;
     const promise = new Promise<RunResult>((done) => {
