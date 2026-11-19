@@ -20,7 +20,10 @@ const MAX_TOTAL_BYTES: usize = 4 << 20;
 const MAX_ENTRIES: usize = 10_000;
 /// Where runtimes keep their own files. Walked only if the run was given a folder by
 /// that name.
-const SYSTEM_ROOTS: &[&str] = &["bin", "dev", "etc", "include", "lib", "share", "tmp", "usr"];
+const SYSTEM_ROOTS: &[&str] = &["__glassjar", "bin", "dev", "etc", "include", "lib", "share", "tmp", "usr"];
+/// The engine's own files in `/`, such as the Python debugger's control file: never the
+/// program's, and reading a device file could disturb it.
+const INTERNAL: &[&str] = &["/__debug__", "/_bridge.py"];
 
 pub(crate) struct Snapshot {
     /// Top-level folders that are not the student's: never walked.
@@ -102,6 +105,9 @@ fn walk(fs: &mem_fs::FileSystem, skip: &HashSet<String>) -> (Vec<String>, bool) 
                 return (files, true);
             }
             let path = entry.path();
+            if INTERNAL.iter().any(|internal| path == Path::new(internal)) {
+                continue;
+            }
             let Ok(kind) = entry.file_type() else { continue };
             if kind.is_file() {
                 files.push(path.to_string_lossy().into_owned());
