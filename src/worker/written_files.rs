@@ -26,6 +26,8 @@ pub(crate) struct Snapshot {
     /// Top-level folders that are not the student's: never walked.
     skip: HashSet<String>,
     files: HashMap<String, Vec<u8>>,
+    /// Files too big to read, by size and modified time: unchanged ones aren't reported.
+    large: HashMap<String, (u64, u64)>,
 }
 
 impl Snapshot {
@@ -36,12 +38,15 @@ impl Snapshot {
         skip.retain(|name| !given.contains(name));
         let (paths, _) = walk(fs, &skip);
         let mut files = HashMap::new();
+        let mut large = HashMap::new();
         for path in paths {
             if let Some(bytes) = read(fs, &path).await {
                 files.insert(path, bytes);
+            } else if let Some(stamp) = stamp(fs, &path) {
+                large.insert(path, stamp);
             }
         }
-        Self { skip, files }
+        Self { skip, files, large }
     }
 
     /// Send `files`: what is new or changed under the same folders, and what disappeared.
@@ -52,7 +57,10 @@ impl Snapshot {
         for path in &paths {
             let before = self.files.remove(path);
             let Some(bytes) = read(fs, path).await else {
-                truncated = true;
+                // Too big to keep: worth a mention only if the program wrote it.
+                if self.large.get(path).copied() != stamp(fs, path) {
+                    truncated = true;
+                }
                 continue;
             };
             if before.as_ref() == Some(&bytes) {
@@ -107,6 +115,11 @@ fn walk(fs: &mem_fs::FileSystem, skip: &HashSet<String>) -> (Vec<String>, bool) 
         }
     }
     (files, false)
+}
+
+fn stamp(fs: &mem_fs::FileSystem, path: &str) -> Option<(u64, u64)> {
+    let meta = fs.metadata(Path::new(path)).ok()?;
+    Some((meta.len, meta.modified))
 }
 
 async fn read(fs: &mem_fs::FileSystem, path: &str) -> Option<Vec<u8>> {
