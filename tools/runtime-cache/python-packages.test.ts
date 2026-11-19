@@ -34,6 +34,14 @@ test('finds third-party imports, not the stdlib or the workspace, plus requireme
   ]);
 });
 
+test('reads one-line import statements without the code after them', () => {
+  const fs = {
+    'main.py':
+      'import sys, os; nums = [int(x) for x in sys.stdin.read().split()]\nx = 1; import numpy as np'
+  };
+  assert.deepEqual(P.requirementsFor(fs), ['numpy']);
+});
+
 test('orders and matches versions like PEP 440', () => {
   const v = (s: string) => P.parseVersion(s);
   const order = ['1.0.dev1', '1.0a1', '1.0b2', '1.0rc1', '1.0', '1.0.post1', '1.1'];

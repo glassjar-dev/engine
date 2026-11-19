@@ -77,17 +77,20 @@ type DirNode = { [name: string]: string | DirNode };
 export function importsIn(source: string): Set<string> {
   const names = new Set<string>();
   for (const raw of source.split('\n')) {
-    const line = raw.replace(/#.*/, '').trim();
-    let match = /^import\s+(.+)$/.exec(line);
-    if (match) {
-      for (const part of match[1].split(',')) {
-        const name = part.trim().split(/\s+/)[0]?.split('.')[0];
-        if (name) names.add(name);
+    // `import a, b; x = 1` holds two statements; only the first names modules.
+    for (const statement of raw.replace(/#.*/, '').split(';')) {
+      const line = statement.trim();
+      let match = /^import\s+(.+)$/.exec(line);
+      if (match) {
+        for (const part of match[1].split(',')) {
+          const name = part.trim().split(/\s+/)[0]?.split('.')[0];
+          if (name && /^[A-Za-z_]\w*$/.test(name)) names.add(name);
+        }
+        continue;
       }
-      continue;
+      match = /^from\s+([A-Za-z_][\w.]*)\s+import\b/.exec(line);
+      if (match) names.add(match[1].split('.')[0]);
     }
-    match = /^from\s+([A-Za-z_][\w.]*)\s+import\b/.exec(line);
-    if (match) names.add(match[1].split('.')[0]);
   }
   return names;
 }
