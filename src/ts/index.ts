@@ -501,7 +501,10 @@ export class Engine {
     return this.submit(false, false, false, files);
   }
 
-  /** Compiles Run-profile C++ translation units only; never links, runs, or opens devices. */
+  /**
+   * Builds without running: C++ compiles its Run-profile translation units (no link, no
+   * devices); Rust compiles and links its crate. Errors arrive as a nonzero exit code.
+   */
   public compile(): Promise<RunResult> {
     return this.submit(true);
   }
@@ -515,8 +518,10 @@ export class Engine {
     if (this.disposed) return Promise.resolve(errorResult(new Error('Engine is disposed')));
     if (this.active || this.cancellationDraining)
       return Promise.resolve(errorResult(new Error('An engine job is already active')));
-    if (buildOnly && this.lang !== 'c')
-      return Promise.resolve(errorResult(new Error('Compile-only is supported for C/C++')));
+    if (buildOnly && this.lang === 'python')
+      return Promise.resolve(
+        errorResult(new Error('Compile-only is supported for C/C++ and Rust'))
+      );
     this.cacheValidation = undefined;
     const omitInputs = prepareOnly && !validateCacheInputs;
     let snapshot: Pick<WorkerStart, 'fs' | 'binary_files' | 'cpp_artifacts'>;

@@ -184,8 +184,8 @@ async fn start(msg: WorkerStart) {
         }
         return start_native(msg).await;
     }
-    if msg.build_only && msg.lang != Lang::C {
-        return WorkerOut::Error { message: "Compile-only preparation requires C/C++".into() }.send();
+    if msg.build_only && msg.lang == Lang::Python {
+        return WorkerOut::Error { message: "Compile-only preparation requires C/C++ or Rust".into() }.send();
     }
     if msg.lang != Lang::C && msg.cpp_artifacts.is_some() {
         return WorkerOut::Error { message: "Binary build inputs require C/C++".into() }.send();
@@ -288,7 +288,7 @@ async fn start_native(mut msg: WorkerStart) {
             let toolchain = execution::compiler_toolchain().expect("verified toolchain");
             start_cpp(is_debug, msg.build_only, msg.prepare_compiler, build_start, sources, exec, fs, host_device, artifacts, msg.cpp_cache, cache_inputs, stock_inputs, toolchain, input_hash_ms, reuse, program).await;
         }
-        Lang::Rust => start_rust(is_debug, build_start, sources, exec, fs, program).await,
+        Lang::Rust => start_rust(is_debug, msg.build_only, build_start, sources, exec, fs, program).await,
         Lang::Python => unreachable!(),
     }
 }
@@ -842,6 +842,7 @@ async fn start_cpp(
 
 async fn start_rust(
     is_debug: bool,
+    build_only: bool,
     build_start: Instant,
     sources: Vec<String>,
     exec: Execution,
@@ -881,7 +882,7 @@ async fn start_rust(
         .await
         .expect("Compilation succeeded");
 
-    if !exit.is_success() {
+    if !exit.is_success() || build_only {
         return stop(exit.raw(), build_start, None).send();
     }
 
