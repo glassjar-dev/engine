@@ -137,6 +137,32 @@ pub struct WorkerStart {
     pub stdin_buffer: js_sys::SharedArrayBuffer,
     pub is_debug: bool,
     pub lang: Lang,
+
+    /// How the student's program is started, like a shell would.
+    #[serde(default)]
+    pub program: ProgramStart,
+}
+
+/// What a shell controls when it starts a program. Compilers never see these.
+#[derive(Default, Debug, Tsify, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramStart {
+    /// Arguments after the program's name (`argv[1..]`, `sys.argv[1:]`).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Absolute directory the program starts in; defaults to `/`.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The file to start from: the Python script or the Rust crate root. Defaults to
+    /// `/main.py` or `/main.rs`. C/C++ picks its files with `CppArtifacts::sources`.
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// Extra environment variables, such as `TERM`, `COLUMNS` and `LINES`.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Report the files the program created, changed or removed once it exits.
+    #[serde(default)]
+    pub collect_files: bool,
 }
 
 /// Optional inputs produced by the same C++ toolchain as this engine.
@@ -250,6 +276,17 @@ pub enum WorkerOut<'a> {
         #[serde(with = "serde_bytes")]
         data: &'a [u8],
         name: String,
+    },
+
+    /// Files the program created, changed or removed, sent just before `stop`.
+    #[serde(rename = "files")]
+    Files {
+        /// `[path, contents]` pairs (a map would arrive as a JS `Map`).
+        #[tsify(type = "Array<[string, Uint8Array]>")]
+        written: Vec<(String, serde_bytes::ByteBuf)>,
+        removed: Vec<String>,
+        /// Some files were left out because they went over the size limits.
+        truncated: bool,
     },
 
     #[serde(rename = "cpp_cache_object")]

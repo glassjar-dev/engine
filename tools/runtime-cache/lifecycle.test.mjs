@@ -932,3 +932,53 @@ test('every language keeps its worker between clean runs by default, until idle'
   assert.ok(workers.at(-1).terminated);
   await optedOut.dispose();
 });
+
+test('program options reach the worker and written files come back with the result', async () => {
+  const engine = await Engine.create('python');
+  engine.debugger.enabled = false;
+  const program = {
+    args: ['Alice', 'two words'],
+    cwd: '/data',
+    entry: '/tools/greet.py',
+    env: { TERM: 'xterm-256color' },
+    collectFiles: true
+  };
+  engine.program = program;
+  const job = engine.run();
+  const worker = workers.at(-1);
+  await ready(worker);
+  assert.deepEqual(worker.messages.at(-1).program, program);
+  const bytes = new Uint8Array([104, 105]);
+  worker.emit({
+    type: 'files',
+    written: [['/data/out.txt', bytes]],
+    removed: ['/data/old.txt'],
+    truncated: false
+  });
+  worker.emit({ type: 'stop', exit_code: 0, build_ms: 1, run_ms: 1 });
+  const result = await job;
+  assert.deepEqual(result.files, {
+    written: { '/data/out.txt': bytes },
+    removed: ['/data/old.txt'],
+    truncated: false
+  });
+  await engine.dispose();
+});
+
+test('stdin.end closes input only after earlier writes land', async () => {
+  const engine = await Engine.create('python');
+  engine.debugger.enabled = false;
+  const job = engine.run();
+  const worker = workers.at(-1);
+  await ready(worker);
+  const indices = new Int32Array(worker.messages.at(-1).stdin_buffer, 0, 3);
+  void engine.stdin.write('abc');
+  void engine.stdin.write('de');
+  await engine.stdin.end();
+  // Closed only once both writes are in the buffer, so the program reads them first.
+  assert.equal(indices[1], 5);
+  assert.equal(indices[2], 1);
+  worker.emit({ type: 'stop', exit_code: 0, build_ms: 1, run_ms: 1 });
+  await job;
+  await engine.dispose();
+});

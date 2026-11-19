@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 use wasmer_wasix::virtual_fs::{AsyncWriteExt, FileSystem, create_dir_all, mem_fs};
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
-use crate::types::{CppArtifacts, CppCacheBypass, CppCacheEntry, CppCacheRequest, CppCacheStats, FsNode, Lang, WorkerOut, WorkerStart};
+use crate::types::{CppArtifacts, CppCacheBypass, CppCacheEntry, CppCacheRequest, CppCacheStats, FsNode, Lang, ProgramStart, WorkerOut, WorkerStart};
 
 mod debuggee;
 mod cpp_cache;
@@ -21,6 +21,7 @@ mod io;
 mod last_build;
 mod read_only_fs;
 mod runtime;
+pub(crate) mod written_files;
 
 use execution::{Execution, extract_tar};
 use host_device::{HOST_DEVICE_PATH, HostDeviceFile};
@@ -28,6 +29,27 @@ use host_device::{HOST_DEVICE_PATH, HostDeviceFile};
 // ╭──────────────────────────────────────────────────────────────────────────╮
 // │ Helpers                                                                  │
 // ╰──────────────────────────────────────────────────────────────────────────╯
+
+/// How the student's program starts, and the top-level names the run was given, which
+/// are the only folders a file report walks.
+pub(crate) struct Program {
+    pub start: ProgramStart,
+    given: std::collections::HashSet<String>,
+}
+
+impl Program {
+    pub fn new(start: ProgramStart, fs: &std::collections::HashMap<String, FsNode>) -> Self {
+        Self { start, given: fs.keys().cloned().collect() }
+    }
+
+    /// Snapshot the files just before the program starts, if the host wants them back.
+    pub async fn snapshot(&self, fs: &mem_fs::FileSystem) -> Option<written_files::Snapshot> {
+        if !self.start.collect_files {
+            return None;
+        }
+        Some(written_files::Snapshot::take(fs, &self.given).await)
+    }
+}
 
 /// Writes binary inputs into a run's private filesystem. Paths must be absolute and free of
 /// `.`/`..` and empty segments, so nothing lands outside where the host put it.
@@ -186,6 +208,7 @@ async fn start(msg: WorkerStart) {
 
 async fn start_native(mut msg: WorkerStart) {
     let build_start = Instant::now();
+    let program = Program::new(std::mem::take(&mut msg.program), &msg.fs);
     let mut sources = Vec::new();
     collect_dir_sources(&msg.fs, &PathBuf::from("/"), msg.lang, &mut sources);
     let mut artifacts = msg.cpp_artifacts.unwrap_or_default();
@@ -198,9 +221,9 @@ async fn start_native(mut msg: WorkerStart) {
     // A Rust crate builds from its root and rustc loads `mod` files itself. Compiling each
     // .rs file on its own would make every module a separate crate with no `main`.
     if msg.lang == Lang::Rust {
-        let root = "/main.rs".to_string();
+        let root = program.start.entry.clone().unwrap_or_else(|| "/main.rs".into());
         if !sources.contains(&root) {
-            return WorkerOut::Error { message: "Rust needs a main.rs crate root".into() }.send();
+            return WorkerOut::Error { message: format!("Rust needs a {root} crate root") }.send();
         }
         sources = vec![root];
     }
@@ -263,9 +286,9 @@ async fn start_native(mut msg: WorkerStart) {
                 }
             };
             let toolchain = execution::compiler_toolchain().expect("verified toolchain");
-            start_cpp(is_debug, msg.build_only, msg.prepare_compiler, build_start, sources, exec, fs, host_device, artifacts, msg.cpp_cache, cache_inputs, stock_inputs, toolchain, input_hash_ms, reuse).await;
+            start_cpp(is_debug, msg.build_only, msg.prepare_compiler, build_start, sources, exec, fs, host_device, artifacts, msg.cpp_cache, cache_inputs, stock_inputs, toolchain, input_hash_ms, reuse, program).await;
         }
-        Lang::Rust => start_rust(is_debug, build_start, sources, exec, fs).await,
+        Lang::Rust => start_rust(is_debug, build_start, sources, exec, fs, program).await,
         Lang::Python => unreachable!(),
     }
 }
@@ -485,6 +508,19 @@ async fn cpp_sysroot(toolchain: &execution::CompilerToolchain) -> (SharedFs, Sha
     (sysroot, exceptions)
 }
 
+/// Objects linked into every student program; sources and build script in
+/// `assets/program-start/`. `cwd.o` starts the program in `GLASSJAR_CWD`, since wasi-libc
+/// always starts at `/`. `stdio.o` (with `--wrap=__stdio_read`) shows a pending `printf`
+/// prompt before reading stdin, as glibc does.
+const START_CWD: &str = "/__glassjar/cwd.o";
+const START_STDIO: &str = "/__glassjar/stdio.o";
+
+async fn mount_start_objects(exec: &Execution) -> bool {
+    create_dir_all(&exec.fs, Path::new("/__glassjar")).is_ok()
+        && exec.write_bytes(START_CWD, include_bytes!("../../assets/program-start/cwd.o")).await.is_ok()
+        && exec.write_bytes(START_STDIO, include_bytes!("../../assets/program-start/stdio.o")).await.is_ok()
+}
+
 const PREAMBLE_HEADER: &str = "/__glassjar/preamble.h";
 const PREAMBLE_PCH: &str = "/__glassjar/preamble.pch";
 
@@ -572,6 +608,7 @@ async fn start_cpp(
     toolchain: std::rc::Rc<execution::CompilerToolchain>,
     input_hash_ms: f64,
     reuse: Option<last_build::BuildInputs>,
+    program: Program,
 ) {
     let reused = reuse.as_ref().and_then(last_build::lookup);
     let hash_start = Instant::now();
@@ -766,6 +803,13 @@ async fn start_cpp(
         exec.write_bytes("/main.wasm", wasm).await.expect("Restored the unchanged build");
         None
     } else {
+        let mut link_args = link_args.clone();
+        // The stock profile links exactly its certified inputs.
+        if !toolchain.stock_profile && mount_start_objects(&exec).await {
+            if let Some(at) = link_args.iter().position(|arg| arg == "-lc") {
+                link_args.splice(at..at, ["--wrap=__stdio_read", START_STDIO, START_CWD].map(String::from));
+            }
+        }
         let mut linker = exec.step("wasm-ld").binary("/llvm.core.wasm").compiler().args(&link_args);
         if toolchain.stock_profile { linker = linker.compiler_stock(None); }
         Some(linker.run().await.expect("Linking succeeded"))
@@ -785,12 +829,14 @@ async fn start_cpp(
         if let Ok(wasm) = exec.read_bytes("/main.wasm").await { last_build::remember(inputs, wasm); }
     }
 
+    let snapshot = program.snapshot(&exec.fs).await;
     let run_start = Instant::now();
     cpp_phase("guest_start", sources.len(), sources.len());
-    let mut run = exec.step("main").binary("/main.wasm").debug(is_debug);
+    let mut run = exec.step("main").binary("/main.wasm").debug(is_debug).program(&program.start);
     if let Some(device) = host_device { run = run.device_file(HOST_DEVICE_PATH, Box::new(device)); }
     let exit = run.run().await.expect("Running succeeded");
     if let Some(cache) = cache { cache.send(); }
+    if let Some(snapshot) = snapshot { snapshot.report(&exec.fs).await; }
     stop(exit.raw(), build_start, Some(run_start)).send();
 }
 
@@ -800,6 +846,7 @@ async fn start_rust(
     sources: Vec<String>,
     exec: Execution,
     fs: mem_fs::FileSystem,
+    program: Program,
 ) {
     // rustc compiles the crate root and links it with the wasm-ld it carries.
     let mut args = vec![
@@ -819,6 +866,10 @@ async fn start_rust(
     if is_debug {
         args.push("-g");
     }
+    let start_object = format!("-Clink-arg={START_CWD}");
+    if mount_start_objects(&exec).await {
+        args.push(&start_object);
+    }
 
     let exit = exec
         .step("rustc")
@@ -834,15 +885,18 @@ async fn start_rust(
         return stop(exit.raw(), build_start, None).send();
     }
 
+    let snapshot = program.snapshot(&exec.fs).await;
     let run_start = Instant::now();
     let exit = exec
         .step("main")
         .binary("/main.wasm")
         .debug(is_debug)
+        .program(&program.start)
         .run()
         .await
         .expect("Running succeeded");
 
+    if let Some(snapshot) = snapshot { snapshot.report(&exec.fs).await; }
     stop(exit.raw(), build_start, Some(run_start)).send();
 }
 

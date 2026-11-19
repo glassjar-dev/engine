@@ -22,7 +22,7 @@ use web_sys::DedicatedWorkerGlobalScope;
 
 use super::debuggee::Debuggee;
 use crate::debug::instrument::{InstrumenterResult, instrument_wasm};
-use crate::types::{StdoutMode, WorkerOut};
+use crate::types::{ProgramStart, StdoutMode, WorkerOut};
 
 use super::io::{Stdin, Stdout};
 use super::runtime::JsRuntime;
@@ -259,6 +259,21 @@ impl<'a> Step<'a> {
             envs.into_iter()
                 .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string())),
         );
+        self
+    }
+
+    /// Start the student's program the way a shell would: arguments, environment and the
+    /// directory it starts in.
+    pub fn program(mut self, program: &ProgramStart) -> Self {
+        self.builder.add_args(&program.args);
+        self.envs.extend(program.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        // wasi-libc starts every program at `/`; the start-up code linked into it (or
+        // Python's sitecustomize) changes to GLASSJAR_CWD before user code runs.
+        if let Some(cwd) = &program.cwd {
+            self.builder.set_current_dir(cwd);
+            self.envs.push(("PWD".into(), cwd.clone()));
+            self.envs.push(("GLASSJAR_CWD".into(), cwd.clone()));
+        }
         self
     }
 

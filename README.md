@@ -84,12 +84,13 @@ engine.binaryFiles; // Record<string, Uint8Array> — optional C/C++ binary file
 engine.cppArtifacts; // Optional selected sources, archives, and precompiled header
 engine.stdout; // Stdout   — .on('data', (chunk: Uint8Array) => …) / .off(...)
 engine.stderr; // Stdout
-engine.stdin; // Stdin    — .write(string | Uint8Array): Promise<void>
+engine.stdin; // Stdin    — .write(string | Uint8Array): Promise<void>; .end() closes input (end-of-file)
+engine.program = { args, cwd, entry, env, collectFiles }; // how the next run starts, like a shell — see below
 engine.hostDevice; // Optional C/C++ and Python duplex byte device — see below
 engine.debugger; // Debugger — DAP interface; set .enabled = false to skip the handshake
 engine.lang; // Lang
 
-engine.run(); // Promise<RunResult> — { type: 'completed', exitCode } | { type: 'stopped' } | { type: 'error', error }
+engine.run(); // Promise<RunResult> — { type: 'completed', exitCode, files? } | { type: 'stopped' } | { type: 'error', error }
 engine.stop(); // void               — kills the worker; run() resolves with { type: 'stopped' }
 
 engine.debugger.send(message); // DAP request, returns response synchronously
@@ -101,6 +102,33 @@ engine.debugger.filterInternals = true;
 ```
 
 See [Presentation filtering (Python)](./docs/integration.md#presentation-filtering-python) in the integration guide for stack `presentationHint`, frame naming (`__main__` vs `main`), and dunder local filtering.
+
+---
+
+## Starting programs like a shell
+
+`engine.program` controls how the next run starts the student's program, so a host can
+offer a terminal with `python greet.py Alice` or `./app < input.txt`:
+
+```ts
+engine.program = {
+  args: ['Alice', 'two words'], // argv[1..] in C/C++ and Rust, sys.argv[1:] in Python
+  cwd: '/data', // relative paths resolve from here
+  entry: '/tools/greet.py', // Python script or Rust crate root (default main.py / main.rs)
+  env: { TERM: 'xterm-256color', COLUMNS: '100', LINES: '30' },
+  collectFiles: true // return what the program wrote
+};
+const result = await engine.run();
+// result.files: { written: { '/data/out.txt': Uint8Array }, removed: ['/data/old.txt'], truncated }
+```
+
+C/C++ chooses its files with `cppArtifacts.sources`. With `collectFiles`, the result lists
+regular files the program created, changed or removed in `/` and the folders it was given
+(at most 64 files, 1 MiB each, 4 MiB in all); the language's own files are never read.
+
+`engine.stdin.end()` closes the program's input once it has read everything written so
+far, like Ctrl+D or the end of a `< file`. C/C++ programs also show a pending `printf`
+prompt before reading stdin, as on Linux.
 
 ---
 

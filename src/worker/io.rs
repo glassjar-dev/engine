@@ -14,9 +14,14 @@ use crate::types::{StdoutMode, WorkerOut};
 // ╰──────────────────────────────────────────────────────────────────────────╯
 
 // Must match TypeScript StdinStream constants
-const HEADER_SIZE: u32 = 8;
+const HEADER_SIZE: u32 = 12;
 const READ_IDX: u32 = 0;
 const WRITE_IDX: u32 = 1;
+/// Set by the host's `stdin.end()`: once the buffer drains, reads return end-of-file.
+const CLOSED_IDX: u32 = 2;
+/// Re-check for `end()` this often while waiting, so a close can't slip between the
+/// check and the wait.
+const WAIT_MS: f64 = 250.0;
 
 #[derive(Debug)]
 pub struct Stdin {
@@ -33,7 +38,7 @@ impl Stdin {
         let indices = js_sys::Int32Array::new_with_byte_offset_and_length(
             stdin_buffer,
             0,
-            2, // 2 i32s: read_index and write_index
+            3, // read_index, write_index, closed
         );
         let data = js_sys::Uint8Array::new_with_byte_offset(
             stdin_buffer,
@@ -78,24 +83,28 @@ impl AsyncRead for Stdin {
             return Poll::Ready(Ok(()));
         }
 
-        let read_idx =
-            js_sys::Atomics::load(&self.indices, READ_IDX).expect("Loaded read_idx") as u32;
-        let write_idx =
-            js_sys::Atomics::load(&self.indices, WRITE_IDX).expect("Loaded write_idx") as u32;
+        let (read_idx, available) = loop {
+            let read_idx =
+                js_sys::Atomics::load(&self.indices, READ_IDX).expect("Loaded read_idx") as u32;
+            let write_idx =
+                js_sys::Atomics::load(&self.indices, WRITE_IDX).expect("Loaded write_idx") as u32;
 
-        // Contiguous bytes available before the buffer wraps.
-        let available = if read_idx <= write_idx {
-            write_idx - read_idx
-        } else {
-            self.data.length() - read_idx
-        };
-
-        if available == 0 {
-            // Wait on the write index
-            js_sys::Atomics::wait(&self.indices, WRITE_IDX, write_idx as i32)
+            // Contiguous bytes available before the buffer wraps.
+            let available = if read_idx <= write_idx {
+                write_idx - read_idx
+            } else {
+                self.data.length() - read_idx
+            };
+            if available > 0 {
+                break (read_idx, available);
+            }
+            // Drained and closed: end-of-file, like Ctrl+D or the end of a `<` file.
+            if js_sys::Atomics::load(&self.indices, CLOSED_IDX).expect("Loaded closed") != 0 {
+                return Poll::Ready(Ok(()));
+            }
+            js_sys::Atomics::wait_with_timeout(&self.indices, WRITE_IDX, write_idx as i32, WAIT_MS)
                 .expect("Waited on write_idx");
-            return self.poll_read(_cx, buf);
-        }
+        };
 
         // Read contiguous chunk only
         let to_read = std::cmp::min(available, buf.remaining() as u32);

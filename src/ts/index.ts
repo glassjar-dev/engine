@@ -88,7 +88,33 @@ export interface CompilerPreparationOptions {
 export type { CppCacheLimits, ObjectCacheStats } from './cpp-object-cache.js';
 
 export type Timing = { totalMs: number; buildMs: number; runMs: number };
-export type CompletedResult = { type: 'completed'; exitCode: number; timing: Timing };
+/** Files a program created, changed or removed, when `program.collectFiles` is set. */
+export interface ProgramFiles {
+  /** New or changed files by absolute path. */
+  written: Record<string, Uint8Array>;
+  removed: string[];
+  /** Some files were left out because they went over the size limits. */
+  truncated: boolean;
+}
+export type CompletedResult = {
+  type: 'completed';
+  exitCode: number;
+  timing: Timing;
+  files?: ProgramFiles;
+};
+/** How a run starts the student's program, the way a shell would. */
+export interface ProgramOptions {
+  /** Arguments after the program's name: `argv[1..]` in C/C++ and Rust, `sys.argv[1:]`. */
+  args?: string[];
+  /** Absolute directory the program starts in; defaults to `/`. */
+  cwd?: string;
+  /** Python script or Rust crate root to start from; defaults to `/main.py` or `/main.rs`. */
+  entry?: string;
+  /** Extra environment variables, such as `TERM`, `COLUMNS` and `LINES`. */
+  env?: Record<string, string>;
+  /** Return the files the program created, changed or removed in the result. */
+  collectFiles?: boolean;
+}
 export type StoppedResult = { type: 'stopped' };
 export type ErrorResult = { type: 'error'; error: { type: string; message: string } };
 export type RunResult = CompletedResult | StoppedResult | ErrorResult;
@@ -165,6 +191,7 @@ interface Job extends OperationIdentity {
   buildOnly: boolean;
   debug: boolean;
   start: WorkerStart;
+  files?: ProgramFiles;
   opener?: HostDeviceOpener;
   device?: HostDeviceSession;
   startedAt: number;
@@ -189,6 +216,8 @@ export class Engine {
   public binaryFiles: Record<string, Uint8Array> = {};
   public cppArtifacts?: CppArtifacts;
   public hostDevice?: HostDeviceOpener;
+  /** How the next run starts the program: arguments, directory, entry file, environment. */
+  public program: ProgramOptions = {};
 
   private readonly options?: Readonly<CppPerformanceOptions>;
   private readonly python?: Readonly<PythonOptions>;
@@ -560,6 +589,13 @@ export class Engine {
         is_debug: debug,
         build_only: buildOnly,
         stdin_buffer: this.stdin[Internals].buffer,
+        program: {
+          args: [...(this.program.args ?? [])].map(String),
+          cwd: this.program.cwd,
+          entry: this.program.entry,
+          env: { ...this.program.env },
+          collectFiles: !!this.program.collectFiles
+        },
         cpp_cache:
           this.options?.objectCache && !debug && !prepareOnly
             ? {
@@ -646,6 +682,12 @@ export class Engine {
                 ? message.reason.slice(0, 128)
                 : 'stock-input-validation'
           };
+        } else if (message.type === 'files') {
+          job.files = {
+            written: Object.fromEntries(message.written),
+            removed: message.removed,
+            truncated: message.truncated
+          };
         } else if (message.type === 'stop') {
           this.finish(job, {
             type: 'completed',
@@ -654,7 +696,8 @@ export class Engine {
               totalMs: performance.now() - job.startedAt,
               buildMs: message.build_ms,
               runMs: message.run_ms
-            }
+            },
+            ...(job.files ? { files: job.files } : {})
           });
         } else if (message.type === 'error') {
           this.finish(job, errorResult(new Error(message.message)));
@@ -954,14 +997,18 @@ export class Stdin {
    */
 
   private static readonly BUFFER_SIZE = 2048;
-  private static readonly HEADER_SIZE = 8; // 2 x i32
+  private static readonly HEADER_SIZE = 12; // 3 x i32
   private static readonly DATA_SIZE = Stdin.BUFFER_SIZE - Stdin.HEADER_SIZE;
   private static readonly READ_IDX = 0;
   private static readonly WRITE_IDX = 1;
+  /** Nonzero after `end()`: reads return end-of-file once the buffer drains. */
+  private static readonly CLOSED_IDX = 2;
   private static encoder = new TextEncoder();
 
   private buffer = new SharedArrayBuffer(Stdin.BUFFER_SIZE);
   private generation = 0;
+  /** Writes and `end()` happen in call order. */
+  private queue: Promise<void> = Promise.resolve();
   private indices: Int32Array;
   private data: Int8Array;
 
@@ -971,7 +1018,7 @@ export class Stdin {
   };
 
   constructor() {
-    this.indices = new Int32Array(this.buffer, 0, 2);
+    this.indices = new Int32Array(this.buffer, 0, 3);
     this.data = new Int8Array(this.buffer, Stdin.HEADER_SIZE);
     const getBuffer = () => this.buffer;
     this[Internals] = {
@@ -986,13 +1033,33 @@ export class Stdin {
     this.generation++;
     Atomics.notify(this.indices, Stdin.READ_IDX);
     this.buffer = new SharedArrayBuffer(Stdin.BUFFER_SIZE);
-    this.indices = new Int32Array(this.buffer, 0, 2);
+    this.indices = new Int32Array(this.buffer, 0, 3);
     this.data = new Int8Array(this.buffer, Stdin.HEADER_SIZE);
+    this.queue = Promise.resolve();
   }
 
-  public async write(value: Uint8Array | string): Promise<void> {
+  public write(value: Uint8Array | string): Promise<void> {
     const chunk = typeof value === 'string' ? Stdin.encoder.encode(value) : value;
-    return this.writeBytes(chunk);
+    return this.enqueue(() => this.writeBytes(chunk));
+  }
+
+  /**
+   * Close the program's input, like Ctrl+D in a terminal or the end of a `< file`:
+   * once it has read everything written so far, its reads return end-of-file.
+   */
+  public end(): Promise<void> {
+    const generation = this.generation;
+    return this.enqueue(async () => {
+      if (generation !== this.generation) return;
+      Atomics.store(this.indices, Stdin.CLOSED_IDX, 1);
+      Atomics.notify(this.indices, Stdin.WRITE_IDX);
+    });
+  }
+
+  private enqueue(task: () => Promise<void>): Promise<void> {
+    const next = this.queue.then(task, task);
+    this.queue = next.catch(() => {});
+    return next;
   }
 
   private async writeBytes(chunk: Uint8Array): Promise<void> {

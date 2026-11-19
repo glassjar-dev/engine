@@ -1,6 +1,8 @@
 import json, os, sys
 
 _user_files = {}
+# The script being debugged: `python /_bridge.py <script> [args...]`.
+_entry = sys.argv[1] if len(sys.argv) > 1 else '/main.py'
 
 
 def is_user_file(path):
@@ -168,7 +170,7 @@ class _Shared:
         while f is not None:
             name = f.f_code.co_name
             path = f.f_code.co_filename
-            if name == '<module>' and path == '/main.py':
+            if name == '<module>' and path == _entry:
                 # Module scope — not the same as a function named `main`.
                 display = '__main__'
             else:
@@ -423,8 +425,11 @@ def _depth(frame):
 
 if __name__ == '__main__':
     debugger = MonitoringBridge() if sys.version_info >= (3, 12) else _bdb_bridge()()
-    _main = open('/main.py').read()
+    # Look like `python <script> [args...]`: the script's argv and import path.
+    sys.argv = sys.argv[1:] or [_entry]
+    sys.path[0] = os.path.dirname(_entry)
+    _main = open(_entry).read()
     debugger.start(
-        compile(_main, '/main.py', 'exec'),
-        {'__file__': '/main.py', '__name__': '__main__'}
+        compile(_main, _entry, 'exec'),
+        {'__file__': _entry, '__name__': '__main__'}
     )
